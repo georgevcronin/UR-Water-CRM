@@ -346,8 +346,10 @@
     }
 
     // Close modal on backdrop click
-    document.getElementById("modal").addEventListener("click", e => {
-      if (e.target.id === "modal") closeModal();
+    window.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("modal").addEventListener("click", e => {
+        if (e.target.id === "modal") closeModal();
+      });
     });
   </script>
 
