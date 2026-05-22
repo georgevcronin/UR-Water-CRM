@@ -74,8 +74,9 @@
         return;
       }
       data.forEach(c => {
-        const sentClass  = c.sent  === "Yes" ? "badge-signed"   : "badge-prospect";
-        const replyClass = c.reply === "Yes" ? "badge-completed" : "badge-prospect";
+        // Sent is a date string (e.g. "12/06/2024") or blank — green if populated, grey if not
+        const sentClass  = (c.sent  && c.sent  !== "No") ? "badge-signed"   : "badge-prospect";
+        const replyClass = (c.reply && c.reply !== "No") ? "badge-completed" : "badge-prospect";
         tbody.innerHTML += `
           <tr>
             <td title="${esc(c.area)}">${esc(c.area)}</td>
@@ -102,7 +103,7 @@
 
     function updateStats(data) {
       document.getElementById("stat-total").textContent  = data.length;
-      document.getElementById("stat-sent").textContent   = data.filter(c => c.sent === "Yes").length;
+      document.getElementById("stat-sent").textContent   = data.filter(c => c.sent && c.sent !== "No").length;
       document.getElementById("stat-reply").textContent  = data.filter(c => c.reply === "Yes").length;
       const areas = new Set(data.map(c => c.area).filter(Boolean));
       document.getElementById("stat-areas").textContent  = areas.size;
@@ -116,7 +117,7 @@
       let filtered = allCustomers.filter(c => {
         const matchQ = !q || [c.practiceName, c.doctorName, c.postCode, c.spid, c.area, c.emailCont, c.organisationCode].some(f => (f||"").toLowerCase().includes(q));
         const matchA = !af || c.area === af;
-        const matchS = !sf || c.sent === sf;
+        const matchS = !sf || (sf === "yes" ? (c.sent && c.sent !== "No") : (!c.sent || c.sent === "No"));
         return matchQ && matchA && matchS;
       });
       renderTable(filtered);
@@ -214,7 +215,7 @@
       ["f-area","f-practiceName","f-doctorName","f-organisationCode","f-postCode",
        "f-addressLine1","f-icb","f-phone","f-practiceManager","f-emailCont","f-spid","f-group"]
         .forEach(id => { document.getElementById(id).value = ""; });
-      document.getElementById("f-sent").value  = "No";
+      document.getElementById("f-sent").value  = "";
       document.getElementById("f-reply").value = "No";
     }
 
@@ -271,6 +272,7 @@
             }
           }
           if (!norm.practiceName && !norm.organisationCode) { skipped++; continue; }
+          if (norm.sent) norm.sent = excelDateToString(norm.sent);
           norm.importedAt = new Date().toISOString();
           await addDoc(collection(db, "customers"), norm);
           imported++;
@@ -315,6 +317,18 @@
       }
       result.push(cur.trim());
       return result;
+    }
+
+    // ── Excel date serial → readable date ─────────
+    function excelDateToString(val) {
+      if (!val && val !== 0) return "";
+      if (typeof val === "string" && isNaN(val.trim())) return val.trim();
+      const num = typeof val === "string" ? parseFloat(val.trim()) : val;
+      if (isNaN(num)) return val.toString().trim();
+      // Excel serial: days since 1 Jan 1900 (accounting for Lotus leap year bug)
+      const date = new Date(Math.round((num - 25569) * 86400 * 1000));
+      if (isNaN(date.getTime())) return val.toString().trim();
+      return date.toLocaleDateString("en-GB"); // DD/MM/YYYY
     }
 
     function parseXLSX(file) {
@@ -504,8 +518,8 @@
       <select id="area-filter" onchange="filterTable()"><option value="">All areas</option></select>
       <select id="sent-filter" onchange="filterTable()">
         <option value="">Sent: All</option>
-        <option>Yes</option>
-        <option>No</option>
+        <option value="yes">Sent</option>
+        <option value="no">Not sent</option>
       </select>
       <div class="toolbar-spacer"></div>
       <button class="btn btn-secondary" onclick="triggerImport()">⬆ Import</button>
@@ -599,11 +613,8 @@
         <input id="f-group" type="text" placeholder="e.g. PCN North" />
       </div>
       <div class="form-group">
-        <label>Sent</label>
-        <select id="f-sent">
-          <option>No</option>
-          <option>Yes</option>
-        </select>
+        <label>Sent Date (DD/MM/YYYY or leave blank)</label>
+        <input id="f-sent" type="text" placeholder="e.g. 12/06/2024" />
       </div>
       <div class="form-group">
         <label>Reply</label>
