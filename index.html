@@ -8,7 +8,7 @@
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import {
-      getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, writeBatch, limit, query
+      getFirestore, collection, addDoc, getDocs, getDoc, doc, updateDoc, deleteDoc, writeBatch, limit, query
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
     import {
       getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
@@ -27,8 +27,16 @@
     const db   = getFirestore(app);
     const auth = getAuth(app);
 
-    let allCustomers = [];
-    let editingId    = null;
+    // ── Pagination state ───────────────────────────
+    const PAGE_SIZE = 50;
+    let currentPage    = 1;
+    let totalEstimate  = 0;
+    let activeSearch   = "";
+    let activeArea     = "";
+    let activeSent     = "";
+    let editingId      = null;
+    let sortField      = "practiceName"; // default
+    let sortDir        = "asc";          // "asc" or "desc"
 
     // ── Auth ───────────────────────────────────────
     onAuthStateChanged(auth, user => {
@@ -36,7 +44,9 @@
         document.getElementById("auth-screen").classList.add("hidden");
         document.getElementById("app-screen").classList.remove("hidden");
         document.getElementById("user-email").textContent = user.email;
-        loadCustomers();
+        loadPage();
+        loadStats();
+        loadAreaFilter();
       } else {
         document.getElementById("auth-screen").classList.remove("hidden");
         document.getElementById("app-screen").classList.add("hidden");
@@ -57,89 +67,170 @@
 
     window.logout = () => signOut(auth);
 
-    // ── Load & Render ──────────────────────────────
-    async function loadCustomers() {
-      document.getElementById("customer-tbody").innerHTML =
-        `<tr><td colspan="15" class="empty-row" style="color:var(--accent)">Loading records…</td></tr>`;
+    // ── Stats (runs once, counts all docs) ────────
+    async function loadStats() {
       try {
-        const snap = await getDocs(query(collection(db, "customers"), limit(1000)));
-        allCustomers = snap.docs.map(d => ({ id: d.id, ...d.data() }))
-          .sort((a, b) => (a.practiceName || "").localeCompare(b.practiceName || ""));
-        renderTable(allCustomers);
-        updateStats(allCustomers);
-        populateAreaFilter();
-        if (allCustomers.length >= 1000) {
-          const w = document.getElementById("limit-warning");
-          if (w) { w.style.display = "block"; }
-        }
-      } catch (e) {
+        const snap = await getDocs(collection(db, "customers"));
+        const all  = snap.docs.map(d => d.data());
+        totalEstimate = all.length;
+        document.getElementById("stat-total").textContent  = all.length;
+        document.getElementById("stat-sent").textContent   = all.filter(c => c.sent && c.sent !== "No").length;
+        document.getElementById("stat-reply").textContent  = all.filter(c => c.reply && c.reply !== "No").length;
+        const areas = new Set(all.map(c => c.area).filter(Boolean));
+        document.getElementById("stat-areas").textContent  = areas.size;
+      } catch(e) { console.error("Stats error:", e); }
+    }
+
+    // ── Area filter population ─────────────────────
+    async function loadAreaFilter() {
+      try {
+        const snap  = await getDocs(collection(db, "customers"));
+        const areas = [...new Set(snap.docs.map(d => d.data().area).filter(Boolean))].sort();
+        const sel   = document.getElementById("area-filter");
+        sel.innerHTML = `<option value="">All areas</option>` +
+          areas.map(a => `<option>${esc(a)}</option>`).join("");
+      } catch(e) {}
+    }
+
+    window.populateAreaFilter = loadAreaFilter;
+
+    // ── Paginated load ─────────────────────────────
+    // When searching/filtering we load all matches client-side (searches are rare, browsing is common)
+    let allDocIds = []; // flat list of all doc IDs in sort order for pagination
+
+    async function loadAllIds() {
+      const snap = await getDocs(collection(db, "customers"));
+      const all  = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      allDocIds  = applySortToRows(all).map(r => r.id);
+    }
+
+    async function loadPage() {
+      setTableLoading(true);
+      try {
+        if (!allDocIds.length) await loadAllIds();
+        const start   = (currentPage - 1) * PAGE_SIZE;
+        const pageIds = allDocIds.slice(start, start + PAGE_SIZE);
+        if (!pageIds.length) { renderTable([]); updatePagination(0); setTableLoading(false); return; }
+        // Fetch just this page's docs by ID
+        const rows = await Promise.all(
+          pageIds.map(id => getDoc(doc(db, "customers", id)).then(s => s.exists() ? { id: s.id, ...s.data() } : null))
+        );
+        renderTable(rows.filter(Boolean));
+        updatePagination(pageIds.length);
+      } catch(e) {
         document.getElementById("customer-tbody").innerHTML =
-          `<tr><td colspan="15" class="empty-row" style="color:var(--danger)">Failed to load: ${e.message}</td></tr>`;
+          `<tr><td colspan="15" class="empty-row" style="color:var(--danger)">Error: ${esc(e.message)}</td></tr>`;
+      }
+      setTableLoading(false);
+    }
+
+    // ── Search — loads all matching docs client-side ──
+    async function loadFiltered() {
+      setTableLoading(true);
+      try {
+        const snap = await getDocs(collection(db, "customers"));
+        let rows   = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+        if (activeSearch) {
+          const q = activeSearch.toLowerCase();
+          rows = rows.filter(c =>
+            [c.practiceName, c.doctorName, c.postCode, c.spid, c.area, c.emailCont, c.organisationCode]
+              .some(f => (f||"").toLowerCase().includes(q))
+          );
+        }
+        if (activeArea) rows = rows.filter(c => c.area === activeArea);
+        if (activeSent === "yes") rows = rows.filter(c => c.sent && c.sent !== "No");
+        if (activeSent === "no")  rows = rows.filter(c => !c.sent || c.sent === "No");
+
+        renderTable(applySortToRows(rows));
+        document.getElementById("page-info").textContent =
+          `${rows.length} result${rows.length !== 1 ? "s" : ""}`;
+        document.getElementById("btn-prev").disabled = true;
+        document.getElementById("btn-next").disabled = true;
+      } catch(e) {
+        document.getElementById("customer-tbody").innerHTML =
+          `<tr><td colspan="15" class="empty-row" style="color:var(--danger)">Search failed: ${esc(e.message)}</td></tr>`;
+      }
+      setTableLoading(false);
+    }
+
+    window.filterTable = () => {
+      activeSearch = document.getElementById("search-input").value.trim();
+      activeArea   = document.getElementById("area-filter").value;
+      activeSent   = document.getElementById("sent-filter").value;
+
+      if (activeSearch || activeArea || activeSent) {
+        loadFiltered();
+      } else {
+        allDocIds = []; currentPage = 1;
+        loadPage();
+      }
+    };
+
+    // ── Pagination controls ────────────────────────
+    window.nextPage = () => {
+      const maxPage = Math.ceil(allDocIds.length / PAGE_SIZE);
+      if (currentPage >= maxPage) return;
+      currentPage++;
+      loadPage();
+    };
+
+    window.prevPage = () => {
+      if (currentPage <= 1) return;
+      currentPage--;
+      loadPage();
+    };
+
+    function updatePagination(rowCount) {
+      const maxPage = Math.ceil(allDocIds.length / PAGE_SIZE) || 1;
+      document.getElementById("btn-prev").disabled = currentPage <= 1;
+      document.getElementById("btn-next").disabled = currentPage >= maxPage;
+      document.getElementById("page-info").textContent = `Page ${currentPage} of ${maxPage}`;
+    }
+
+    function setTableLoading(on) {
+      if (on) {
+        document.getElementById("customer-tbody").innerHTML =
+          `<tr><td colspan="15" class="empty-row" style="color:var(--accent)">Loading…</td></tr>`;
       }
     }
 
+    // ── Render ─────────────────────────────────────
     function renderTable(data) {
       const tbody = document.getElementById("customer-tbody");
       tbody.innerHTML = "";
       if (!data.length) {
-        tbody.innerHTML = `<tr><td colspan="15" class="empty-row">No records yet. Add one or import a spreadsheet.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="15" class="empty-row">No records found.</td></tr>`;
         return;
       }
-      data.forEach(c => {
-        // Sent is a date string (e.g. "12/06/2024") or blank — green if populated, grey if not
+      const sorted = applySortToRows(data);
+      const rows = sorted.map(c => {
         const sentClass  = (c.sent  && c.sent  !== "No") ? "badge-signed"   : "badge-prospect";
         const replyClass = (c.reply && c.reply !== "No") ? "badge-completed" : "badge-prospect";
-        tbody.innerHTML += `
-          <tr>
-            <td title="${esc(c.area)}">${esc(c.area)}</td>
-            <td title="${esc(c.practiceName)}">${esc(c.practiceName)}</td>
-            <td title="${esc(c.doctorName)}">${esc(c.doctorName)}</td>
-            <td title="${esc(c.organisationCode)}">${esc(c.organisationCode)}</td>
-            <td title="${esc(c.postCode)}">${esc(c.postCode)}</td>
-            <td title="${esc(c.addressLine1)}">${esc(c.addressLine1)}</td>
-            <td title="${esc(c.icb)}">${esc(c.icb)}</td>
-            <td title="${esc(c.phone)}">${esc(c.phone)}</td>
-            <td title="${esc(c.practiceManager)}">${esc(c.practiceManager)}</td>
-            <td title="${esc(c.emailCont)}">${esc(c.emailCont)}</td>
-            <td title="${esc(c.spid)}">${esc(c.spid)}</td>
-            <td title="${esc(c.group)}">${esc(c.group)}</td>
-            <td><span class="badge ${sentClass}">${esc(c.sent || "No")}</span></td>
-            <td><span class="badge ${replyClass}">${esc(c.reply || "No")}</span></td>
-            <td class="action-cell">
-              <button class="btn-icon edit-btn" onclick="openEdit('${c.id}')">✎</button>
-              <button class="btn-icon del-btn" onclick="deleteCustomer('${c.id}')">✕</button>
-            </td>
-          </tr>`;
+        return `<tr>
+          <td title="${esc(c.area)}">${esc(c.area)}</td>
+          <td title="${esc(c.practiceName)}">${esc(c.practiceName)}</td>
+          <td title="${esc(c.doctorName)}">${esc(c.doctorName)}</td>
+          <td title="${esc(c.organisationCode)}">${esc(c.organisationCode)}</td>
+          <td title="${esc(c.postCode)}">${esc(c.postCode)}</td>
+          <td title="${esc(c.addressLine1)}">${esc(c.addressLine1)}</td>
+          <td title="${esc(c.icb)}">${esc(c.icb)}</td>
+          <td title="${esc(c.phone)}">${esc(c.phone)}</td>
+          <td title="${esc(c.practiceManager)}">${esc(c.practiceManager)}</td>
+          <td title="${esc(c.emailCont)}">${esc(c.emailCont)}</td>
+          <td title="${esc(c.spid)}">${esc(c.spid)}</td>
+          <td title="${esc(c.group)}">${esc(c.group)}</td>
+          <td><span class="badge ${sentClass}">${esc(c.sent || "—")}</span></td>
+          <td><span class="badge ${replyClass}">${esc(c.reply || "—")}</span></td>
+          <td class="action-cell">
+            <button class="btn-icon edit-btn" onclick="openEdit('${c.id}')">✎</button>
+            <button class="btn-icon del-btn" onclick="deleteCustomer('${c.id}')">✕</button>
+          </td>
+        </tr>`;
       });
+      // Build all HTML at once — much faster than innerHTML +=
+      tbody.innerHTML = rows.join("");
     }
-
-    function updateStats(data) {
-      document.getElementById("stat-total").textContent  = data.length;
-      document.getElementById("stat-sent").textContent   = data.filter(c => c.sent && c.sent !== "No").length;
-      document.getElementById("stat-reply").textContent  = data.filter(c => c.reply === "Yes").length;
-      const areas = new Set(data.map(c => c.area).filter(Boolean));
-      document.getElementById("stat-areas").textContent  = areas.size;
-    }
-
-    // ── Search & Filter ────────────────────────────
-    window.filterTable = () => {
-      const q  = document.getElementById("search-input").value.toLowerCase();
-      const af = document.getElementById("area-filter").value;
-      const sf = document.getElementById("sent-filter").value;
-      let filtered = allCustomers.filter(c => {
-        const matchQ = !q || [c.practiceName, c.doctorName, c.postCode, c.spid, c.area, c.emailCont, c.organisationCode].some(f => (f||"").toLowerCase().includes(q));
-        const matchA = !af || c.area === af;
-        const matchS = !sf || (sf === "yes" ? (c.sent && c.sent !== "No") : (!c.sent || c.sent === "No"));
-        return matchQ && matchA && matchS;
-      });
-      renderTable(filtered);
-    };
-
-    window.populateAreaFilter = () => {
-      const areas  = [...new Set(allCustomers.map(c => c.area).filter(Boolean))].sort();
-      const select = document.getElementById("area-filter");
-      select.innerHTML = `<option value="">All areas</option>` + areas.map(a => `<option>${esc(a)}</option>`).join("");
-    };
 
     // ── Add / Edit ─────────────────────────────────
     window.openAdd = () => {
@@ -151,24 +242,27 @@
 
     window.openEdit = (id) => {
       editingId = id;
-      const c = allCustomers.find(x => x.id === id);
-      if (!c) return;
-      document.getElementById("modal-title").textContent = "Edit Practice";
-      document.getElementById("f-area").value             = c.area || "";
-      document.getElementById("f-practiceName").value     = c.practiceName || "";
-      document.getElementById("f-doctorName").value       = c.doctorName || "";
-      document.getElementById("f-organisationCode").value = c.organisationCode || "";
-      document.getElementById("f-postCode").value         = c.postCode || "";
-      document.getElementById("f-addressLine1").value     = c.addressLine1 || "";
-      document.getElementById("f-icb").value              = c.icb || "";
-      document.getElementById("f-phone").value            = c.phone || "";
-      document.getElementById("f-practiceManager").value  = c.practiceManager || "";
-      document.getElementById("f-emailCont").value        = c.emailCont || "";
-      document.getElementById("f-spid").value             = c.spid || "";
-      document.getElementById("f-group").value            = c.group || "";
-      document.getElementById("f-sent").value             = c.sent || "No";
-      document.getElementById("f-reply").value            = c.reply || "No";
-      document.getElementById("modal").classList.remove("hidden");
+      // Find in current visible rows via a fresh getDocs for just this doc
+      getDoc(doc(db, "customers", id)).then(snap => {
+        if (!snap.exists()) return;
+        const c = snap.data();
+        document.getElementById("modal-title").textContent = "Edit Practice";
+        document.getElementById("f-area").value             = c.area || "";
+        document.getElementById("f-practiceName").value     = c.practiceName || "";
+        document.getElementById("f-doctorName").value       = c.doctorName || "";
+        document.getElementById("f-organisationCode").value = c.organisationCode || "";
+        document.getElementById("f-postCode").value         = c.postCode || "";
+        document.getElementById("f-addressLine1").value     = c.addressLine1 || "";
+        document.getElementById("f-icb").value              = c.icb || "";
+        document.getElementById("f-phone").value            = c.phone || "";
+        document.getElementById("f-practiceManager").value  = c.practiceManager || "";
+        document.getElementById("f-emailCont").value        = c.emailCont || "";
+        document.getElementById("f-spid").value             = c.spid || "";
+        document.getElementById("f-group").value            = c.group || "";
+        document.getElementById("f-sent").value             = c.sent || "";
+        document.getElementById("f-reply").value            = c.reply || "No";
+        document.getElementById("modal").classList.remove("hidden");
+      });
     };
 
     window.closeModal = () => {
@@ -190,14 +284,13 @@
         emailCont:        document.getElementById("f-emailCont").value.trim(),
         spid:             document.getElementById("f-spid").value.trim(),
         group:            document.getElementById("f-group").value.trim(),
-        sent:             document.getElementById("f-sent").value,
+        sent:             document.getElementById("f-sent").value.trim(),
         reply:            document.getElementById("f-reply").value,
       };
       if (!data.practiceName) { alert("Practice name is required."); return; }
 
       const saveBtn = document.getElementById("save-btn");
       saveBtn.disabled = true; saveBtn.textContent = "Saving…";
-
       try {
         if (editingId) {
           await updateDoc(doc(db, "customers", editingId), data);
@@ -206,8 +299,8 @@
           await addDoc(collection(db, "customers"), data);
         }
         closeModal();
-        await loadCustomers();
-        populateAreaFilter();
+        loadPage(pageStack[pageStack.length - 1] || null);
+        loadStats();
       } catch (e) {
         alert("Error saving: " + e.message);
       } finally {
@@ -216,23 +309,20 @@
     };
 
     window.deleteCustomer = async (id) => {
-      const c = allCustomers.find(x => x.id === id);
-      if (!confirm(`Delete ${c?.practiceName}? This cannot be undone.`)) return;
+      if (!confirm("Delete this practice? This cannot be undone.")) return;
       await deleteDoc(doc(db, "customers", id));
-      await loadCustomers();
-      populateAreaFilter();
+      loadPage(pageStack[pageStack.length - 1] || null);
+      loadStats();
     };
 
     function clearForm() {
       ["f-area","f-practiceName","f-doctorName","f-organisationCode","f-postCode",
-       "f-addressLine1","f-icb","f-phone","f-practiceManager","f-emailCont","f-spid","f-group"]
+       "f-addressLine1","f-icb","f-phone","f-practiceManager","f-emailCont","f-spid","f-group","f-sent"]
         .forEach(id => { document.getElementById(id).value = ""; });
-      document.getElementById("f-sent").value  = "";
       document.getElementById("f-reply").value = "No";
     }
 
     // ── Import ─────────────────────────────────────
-    // Maps spreadsheet column headers → our field names
     const COLUMN_MAP = {
       area:             ["area"],
       practiceName:     ["practice name","practicename","practice"],
@@ -256,8 +346,9 @@
       const file = e.target.files[0];
       if (!file) return;
       const ext = file.name.split(".").pop().toLowerCase();
-      if (!["csv","xlsx","xls","ods"].includes(ext)) { alert("Please upload a .csv, .xlsx, .xls, or .ods file."); return; }
-
+      if (!["csv","xlsx","xls","ods"].includes(ext)) {
+        alert("Please upload a .csv, .xlsx, .xls, or .ods file."); return;
+      }
       const statusEl = document.getElementById("import-status");
       statusEl.textContent = "Reading file…";
       statusEl.className = "import-status info";
@@ -272,7 +363,7 @@
           colIdx[field] = aliases.find(a => headers.includes(a)) ?? null;
         }
 
-        let imported = 0, skipped = 0;
+        let skipped = 0;
         const validRecords = [];
         for (const row of rows) {
           const norm = {};
@@ -290,7 +381,8 @@
           validRecords.push(norm);
         }
 
-        // Write in batches of 499 (Firestore max is 500)
+        statusEl.textContent = `Writing ${validRecords.length} records…`;
+        let imported = 0;
         const BATCH_SIZE = 499;
         for (let i = 0; i < validRecords.length; i += BATCH_SIZE) {
           const batch = writeBatch(db);
@@ -299,12 +391,15 @@
           });
           await batch.commit();
           imported += Math.min(BATCH_SIZE, validRecords.length - i);
+          statusEl.textContent = `Writing… ${imported} / ${validRecords.length}`;
         }
 
-        statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""}${skipped ? ` (${skipped} skipped — no practice name or org code)` : ""}.`;
+        statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""}${skipped ? ` (${skipped} skipped)` : ""}.`;
         statusEl.className = "import-status success";
-        await loadCustomers();
-        populateAreaFilter();
+        allDocIds = []; currentPage = 1;
+        loadPage();
+        loadStats();
+        loadAreaFilter();
       } catch (err) {
         statusEl.textContent = "Import failed: " + err.message;
         statusEl.className = "import-status error";
@@ -312,6 +407,18 @@
       e.target.value = "";
     };
 
+    // ── Excel date conversion ──────────────────────
+    function excelDateToString(val) {
+      if (!val && val !== 0) return "";
+      if (typeof val === "string" && isNaN(val.trim())) return val.trim();
+      const num = typeof val === "string" ? parseFloat(val.trim()) : val;
+      if (isNaN(num)) return val.toString().trim();
+      const date = new Date(Math.round((num - 25569) * 86400 * 1000));
+      if (isNaN(date.getTime())) return val.toString().trim();
+      return date.toLocaleDateString("en-GB");
+    }
+
+    // ── CSV Parser ─────────────────────────────────
     function parseCSV(file) {
       return new Promise((res, rej) => {
         const reader = new FileReader();
@@ -342,26 +449,15 @@
       return result;
     }
 
-    // ── Excel date serial → readable date ─────────
-    function excelDateToString(val) {
-      if (!val && val !== 0) return "";
-      if (typeof val === "string" && isNaN(val.trim())) return val.trim();
-      const num = typeof val === "string" ? parseFloat(val.trim()) : val;
-      if (isNaN(num)) return val.toString().trim();
-      // Excel serial: days since 1 Jan 1900 (accounting for Lotus leap year bug)
-      const date = new Date(Math.round((num - 25569) * 86400 * 1000));
-      if (isNaN(date.getTime())) return val.toString().trim();
-      return date.toLocaleDateString("en-GB"); // DD/MM/YYYY
-    }
-
+    // ── XLSX/ODS Parser ────────────────────────────
     function parseXLSX(file) {
       return new Promise((res, rej) => {
         if (!window.XLSX) { rej(new Error("XLSX library not loaded yet — try again in a moment.")); return; }
         const reader = new FileReader();
         reader.onload = e => {
           try {
-            const wb   = XLSX.read(e.target.result, { type: "array" });
-            const ws   = wb.Sheets[wb.SheetNames[0]];
+            const wb = XLSX.read(e.target.result, { type: "array" });
+            const ws = wb.Sheets[wb.SheetNames[0]];
             res(XLSX.utils.sheet_to_json(ws, { defval: "" }));
           } catch (err) { rej(err); }
         };
@@ -371,22 +467,94 @@
     }
 
     // ── Export ─────────────────────────────────────
-    window.exportCSV = () => {
-      const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Practice Manager","Email Cont.","SPID","Group","Sent","Reply"];
-      const rows = allCustomers.map(c => [
-        c.area, c.practiceName, c.doctorName, c.organisationCode, c.postCode,
-        c.addressLine1, c.icb, c.phone, c.practiceManager, c.emailCont,
-        c.spid, c.group, c.sent, c.reply
-      ].map(v => `"${(v||"").replace(/"/g,'""')}"`));
-      const csv  = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
-      const blob = new Blob([csv], { type: "text/csv" });
-      const a    = document.createElement("a"); a.href = URL.createObjectURL(blob);
-      a.download = `urwater-crm-${new Date().toISOString().slice(0,10)}.csv`;
-      a.click();
+    window.exportCSV = async () => {
+      const statusEl = document.getElementById("import-status");
+      statusEl.textContent = "Preparing export…";
+      statusEl.className = "import-status info";
+      try {
+        const snap = await getDocs(collection(db, "customers"));
+        const all  = snap.docs.map(d => d.data());
+        const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Practice Manager","Email Cont.","SPID","Group","Sent","Reply"];
+        const rows = all.map(c => [
+          c.area, c.practiceName, c.doctorName, c.organisationCode, c.postCode,
+          c.addressLine1, c.icb, c.phone, c.practiceManager, c.emailCont,
+          c.spid, c.group, c.sent, c.reply
+        ].map(v => `"${(v||"").replace(/"/g,'""')}"`));
+        const csv  = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+        const blob = new Blob([csv], { type: "text/csv" });
+        const a    = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `urwater-crm-${new Date().toISOString().slice(0,10)}.csv`;
+        a.click();
+        statusEl.textContent = `✓ Exported ${all.length} records.`;
+        statusEl.className = "import-status success";
+      } catch(e) {
+        statusEl.textContent = "Export failed: " + e.message;
+        statusEl.className = "import-status error";
+      }
     };
 
     function esc(s) {
       return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    // ── Sort ──────────────────────────────────────
+    function applySortToRows(rows) {
+      return rows.slice().sort((a, b) => {
+        let av = (a[sortField] || "").toString();
+        let bv = (b[sortField] || "").toString();
+
+        // For sent date, parse DD/MM/YYYY into a comparable value
+        if (sortField === "sent") {
+          const parseDate = s => {
+            if (!s || s === "No" || s === "—") return 0;
+            const parts = s.split("/");
+            if (parts.length === 3) return new Date(parts[2], parts[1]-1, parts[0]).getTime();
+            return 0;
+          };
+          av = parseDate(av);
+          bv = parseDate(bv);
+          return sortDir === "asc" ? av - bv : bv - av;
+        }
+
+        // String compare for area / practiceName
+        const cmp = av.localeCompare(bv, "en", { sensitivity: "base" });
+        return sortDir === "asc" ? cmp : -cmp;
+      });
+    }
+
+    window.handleSortSelect = (val) => {
+      const [field, dir] = val.split("_");
+      sortField = field;
+      sortDir   = dir;
+      allDocIds = []; currentPage = 1;
+      if (activeSearch || activeArea || activeSent) {
+        loadFiltered();
+      } else {
+        loadPage();
+      }
+    };
+
+    window.setSort = (field) => {
+      if (sortField === field) {
+        sortDir = sortDir === "asc" ? "desc" : "asc";
+      } else {
+        sortField = field;
+        sortDir   = "asc";
+      }
+      updateSortUI();
+      allDocIds = []; currentPage = 1;
+      if (activeSearch || activeArea || activeSent) {
+        loadFiltered();
+      } else {
+        loadPage();
+      }
+    };
+
+    function updateSortUI() {
+      // Update the sort dropdown to reflect current state
+      const sel = document.getElementById("sort-select");
+      if (sel) sel.value = sortField + "_" + sortDir;
     }
 
     window.addEventListener("DOMContentLoaded", () => {
@@ -499,6 +667,14 @@
     .form-group input, .form-group select { width: 100%; padding: 9px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: inherit; font-size: 13px; outline: none; transition: border-color .2s; }
     .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
     .form-group select option { background: var(--surface); }
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { color: var(--accent); }
+
+    .pagination {
+      display: flex; align-items: center; justify-content: center;
+      gap: 16px; margin-top: 16px; padding-bottom: 24px;
+    }
+
     .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
   </style>
 </head>
@@ -544,6 +720,14 @@
         <option value="yes">Sent</option>
         <option value="no">Not sent</option>
       </select>
+      <select id="sort-select" onchange="handleSortSelect(this.value)" title="Sort by">
+        <option value="practiceName_asc">Practice Name A→Z</option>
+        <option value="practiceName_desc">Practice Name Z→A</option>
+        <option value="area_asc">Area A→Z</option>
+        <option value="area_desc">Area Z→A</option>
+        <option value="sent_desc">Sent Date (Newest)</option>
+        <option value="sent_asc">Sent Date (Oldest)</option>
+      </select>
       <div class="toolbar-spacer"></div>
       <button class="btn btn-secondary" onclick="triggerImport()">⬆ Import</button>
       <button class="btn btn-secondary" onclick="exportCSV()">⬇ Export CSV</button>
@@ -556,11 +740,14 @@
     <div id="limit-warning" style="display:none;background:rgba(248,81,73,.1);color:#f85149;padding:10px 14px;border-radius:10px;font-size:12px;margin-bottom:10px;">
       ⚠ Over 1,000 records detected — only showing the first 1,000. Please delete duplicate records in Firebase Console.
     </div>
+    <div id="limit-warning" style="display:none;background:rgba(248,81,73,.1);color:#f85149;padding:10px 14px;border-radius:10px;font-size:12px;margin-bottom:10px;">
+      ⚠ Showing first 50 records. Use search or filters to find specific records, or use Next to browse.
+    </div>
     <div class="table-wrap" style="margin-top:10px">
       <table>
         <thead>
           <tr>
-            <th>Area</th>
+            <th class="sortable" onclick="setSort('area')" title="Sort by Area">Area ⇅</th>
             <th>Practice Name</th>
             <th>Doctor Name</th>
             <th>Org Code</th>
@@ -572,7 +759,7 @@
             <th>Email</th>
             <th>SPID</th>
             <th>Group</th>
-            <th>Sent</th>
+            <th class="sortable" onclick="setSort('sent')" title="Sort by Sent Date">Sent ⇅</th>
             <th>Reply</th>
             <th>Actions</th>
           </tr>
