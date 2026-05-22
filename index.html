@@ -8,7 +8,7 @@
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import {
-      getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, writeBatch
+      getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, writeBatch, limit, query
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
     import {
       getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
@@ -62,12 +62,16 @@
       document.getElementById("customer-tbody").innerHTML =
         `<tr><td colspan="15" class="empty-row" style="color:var(--accent)">Loading records…</td></tr>`;
       try {
-        const snap = await getDocs(collection(db, "customers"));
+        const snap = await getDocs(query(collection(db, "customers"), limit(1000)));
         allCustomers = snap.docs.map(d => ({ id: d.id, ...d.data() }))
           .sort((a, b) => (a.practiceName || "").localeCompare(b.practiceName || ""));
         renderTable(allCustomers);
         updateStats(allCustomers);
         populateAreaFilter();
+        if (allCustomers.length >= 1000) {
+          const w = document.getElementById("limit-warning");
+          if (w) { w.style.display = "block"; }
+        }
       } catch (e) {
         document.getElementById("customer-tbody").innerHTML =
           `<tr><td colspan="15" class="empty-row" style="color:var(--danger)">Failed to load: ${e.message}</td></tr>`;
@@ -549,6 +553,9 @@
     <input type="file" id="import-file" accept=".csv,.xlsx,.xls,.ods" class="hidden" onchange="handleImport(event)" />
     <div id="import-status"></div>
 
+    <div id="limit-warning" style="display:none;background:rgba(248,81,73,.1);color:#f85149;padding:10px 14px;border-radius:10px;font-size:12px;margin-bottom:10px;">
+      ⚠ Over 1,000 records detected — only showing the first 1,000. Please delete duplicate records in Firebase Console.
+    </div>
     <div class="table-wrap" style="margin-top:10px">
       <table>
         <thead>
