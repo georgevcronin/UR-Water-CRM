@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>URwater CRM</title>
 
-  <!-- Firebase SDK -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import {
@@ -15,9 +14,6 @@
       getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
-    // ─────────────────────────────────────────────
-    // 🔧 REPLACE THESE WITH YOUR FIREBASE CONFIG
-    // ─────────────────────────────────────────────
     const firebaseConfig = {
       apiKey: "AIzaSyCD5kRxH0-tIemXG4wnmLvv8hnSBXyDsX0",
       authDomain: "urwater-crm.firebaseapp.com",
@@ -31,7 +27,6 @@
     const db   = getFirestore(app);
     const auth = getAuth(app);
 
-    // ── State ──────────────────────────────────────
     let allCustomers = [];
     let editingId    = null;
 
@@ -64,7 +59,7 @@
 
     // ── Load & Render ──────────────────────────────
     async function loadCustomers() {
-      const q    = query(collection(db, "customers"), orderBy("fullName"));
+      const q    = query(collection(db, "customers"), orderBy("practiceName"));
       const snap = await getDocs(q);
       allCustomers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       renderTable(allCustomers);
@@ -75,28 +70,28 @@
       const tbody = document.getElementById("customer-tbody");
       tbody.innerHTML = "";
       if (!data.length) {
-        tbody.innerHTML = `<tr><td colspan="9" class="empty-row">No customers yet. Add one or import a spreadsheet.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="15" class="empty-row">No records yet. Add one or import a spreadsheet.</td></tr>`;
         return;
       }
       data.forEach(c => {
-        const progressClass = {
-          "Prospect": "badge-prospect",
-          "In Progress": "badge-inprogress",
-          "Signed": "badge-signed",
-          "Completed": "badge-completed",
-          "Cancelled": "badge-cancelled"
-        }[c.contractProgress] || "badge-prospect";
-
+        const sentClass  = c.sent  === "Yes" ? "badge-signed"   : "badge-prospect";
+        const replyClass = c.reply === "Yes" ? "badge-completed" : "badge-prospect";
         tbody.innerHTML += `
           <tr>
-            <td>${esc(c.fullName)}</td>
-            <td>${esc(c.email)}</td>
-            <td>${esc(c.location)}</td>
-            <td>${esc(c.spid)}</td>
-            <td><span class="badge ${progressClass}">${esc(c.contractProgress)}</span></td>
-            <td>${esc(c.contractLength)}</td>
-            <td>${esc(c.notes || "—")}</td>
-            <td>${c.importedAt ? new Date(c.importedAt).toLocaleDateString("en-GB") : (c.createdAt ? new Date(c.createdAt.toDate ? c.createdAt.toDate() : c.createdAt).toLocaleDateString("en-GB") : "—")}</td>
+            <td title="${esc(c.area)}">${esc(c.area)}</td>
+            <td title="${esc(c.practiceName)}">${esc(c.practiceName)}</td>
+            <td title="${esc(c.doctorName)}">${esc(c.doctorName)}</td>
+            <td title="${esc(c.organisationCode)}">${esc(c.organisationCode)}</td>
+            <td title="${esc(c.postCode)}">${esc(c.postCode)}</td>
+            <td title="${esc(c.addressLine1)}">${esc(c.addressLine1)}</td>
+            <td title="${esc(c.icb)}">${esc(c.icb)}</td>
+            <td title="${esc(c.phone)}">${esc(c.phone)}</td>
+            <td title="${esc(c.practiceManager)}">${esc(c.practiceManager)}</td>
+            <td title="${esc(c.emailCont)}">${esc(c.emailCont)}</td>
+            <td title="${esc(c.spid)}">${esc(c.spid)}</td>
+            <td title="${esc(c.group)}">${esc(c.group)}</td>
+            <td><span class="badge ${sentClass}">${esc(c.sent || "No")}</span></td>
+            <td><span class="badge ${replyClass}">${esc(c.reply || "No")}</span></td>
             <td class="action-cell">
               <button class="btn-icon edit-btn" onclick="openEdit('${c.id}')">✎</button>
               <button class="btn-icon del-btn" onclick="deleteCustomer('${c.id}')">✕</button>
@@ -106,28 +101,37 @@
     }
 
     function updateStats(data) {
-      document.getElementById("stat-total").textContent   = data.length;
-      document.getElementById("stat-signed").textContent  = data.filter(c => c.contractProgress === "Signed").length;
-      document.getElementById("stat-progress").textContent= data.filter(c => c.contractProgress === "In Progress").length;
-      document.getElementById("stat-prospect").textContent= data.filter(c => c.contractProgress === "Prospect").length;
+      document.getElementById("stat-total").textContent  = data.length;
+      document.getElementById("stat-sent").textContent   = data.filter(c => c.sent === "Yes").length;
+      document.getElementById("stat-reply").textContent  = data.filter(c => c.reply === "Yes").length;
+      const areas = new Set(data.map(c => c.area).filter(Boolean));
+      document.getElementById("stat-areas").textContent  = areas.size;
     }
 
     // ── Search & Filter ────────────────────────────
     window.filterTable = () => {
       const q  = document.getElementById("search-input").value.toLowerCase();
-      const pf = document.getElementById("progress-filter").value;
+      const af = document.getElementById("area-filter").value;
+      const sf = document.getElementById("sent-filter").value;
       let filtered = allCustomers.filter(c => {
-        const matchQ = !q || [c.fullName, c.email, c.location, c.spid].some(f => (f||"").toLowerCase().includes(q));
-        const matchP = !pf || c.contractProgress === pf;
-        return matchQ && matchP;
+        const matchQ = !q || [c.practiceName, c.doctorName, c.postCode, c.spid, c.area, c.emailCont, c.organisationCode].some(f => (f||"").toLowerCase().includes(q));
+        const matchA = !af || c.area === af;
+        const matchS = !sf || c.sent === sf;
+        return matchQ && matchA && matchS;
       });
       renderTable(filtered);
+    };
+
+    window.populateAreaFilter = () => {
+      const areas  = [...new Set(allCustomers.map(c => c.area).filter(Boolean))].sort();
+      const select = document.getElementById("area-filter");
+      select.innerHTML = `<option value="">All areas</option>` + areas.map(a => `<option>${esc(a)}</option>`).join("");
     };
 
     // ── Add / Edit ─────────────────────────────────
     window.openAdd = () => {
       editingId = null;
-      document.getElementById("modal-title").textContent = "Add Customer";
+      document.getElementById("modal-title").textContent = "Add Practice";
       clearForm();
       document.getElementById("modal").classList.remove("hidden");
     };
@@ -136,14 +140,21 @@
       editingId = id;
       const c = allCustomers.find(x => x.id === id);
       if (!c) return;
-      document.getElementById("modal-title").textContent = "Edit Customer";
-      document.getElementById("f-fullName").value         = c.fullName || "";
-      document.getElementById("f-email").value            = c.email || "";
-      document.getElementById("f-location").value         = c.location || "";
+      document.getElementById("modal-title").textContent = "Edit Practice";
+      document.getElementById("f-area").value             = c.area || "";
+      document.getElementById("f-practiceName").value     = c.practiceName || "";
+      document.getElementById("f-doctorName").value       = c.doctorName || "";
+      document.getElementById("f-organisationCode").value = c.organisationCode || "";
+      document.getElementById("f-postCode").value         = c.postCode || "";
+      document.getElementById("f-addressLine1").value     = c.addressLine1 || "";
+      document.getElementById("f-icb").value              = c.icb || "";
+      document.getElementById("f-phone").value            = c.phone || "";
+      document.getElementById("f-practiceManager").value  = c.practiceManager || "";
+      document.getElementById("f-emailCont").value        = c.emailCont || "";
       document.getElementById("f-spid").value             = c.spid || "";
-      document.getElementById("f-progress").value         = c.contractProgress || "Prospect";
-      document.getElementById("f-length").value           = c.contractLength || "";
-      document.getElementById("f-notes").value            = c.notes || "";
+      document.getElementById("f-group").value            = c.group || "";
+      document.getElementById("f-sent").value             = c.sent || "No";
+      document.getElementById("f-reply").value            = c.reply || "No";
       document.getElementById("modal").classList.remove("hidden");
     };
 
@@ -154,19 +165,25 @@
 
     window.saveCustomer = async () => {
       const data = {
-        fullName:         document.getElementById("f-fullName").value.trim(),
-        email:            document.getElementById("f-email").value.trim(),
-        location:         document.getElementById("f-location").value.trim(),
+        area:             document.getElementById("f-area").value.trim(),
+        practiceName:     document.getElementById("f-practiceName").value.trim(),
+        doctorName:       document.getElementById("f-doctorName").value.trim(),
+        organisationCode: document.getElementById("f-organisationCode").value.trim(),
+        postCode:         document.getElementById("f-postCode").value.trim(),
+        addressLine1:     document.getElementById("f-addressLine1").value.trim(),
+        icb:              document.getElementById("f-icb").value.trim(),
+        phone:            document.getElementById("f-phone").value.trim(),
+        practiceManager:  document.getElementById("f-practiceManager").value.trim(),
+        emailCont:        document.getElementById("f-emailCont").value.trim(),
         spid:             document.getElementById("f-spid").value.trim(),
-        contractProgress: document.getElementById("f-progress").value,
-        contractLength:   document.getElementById("f-length").value.trim(),
-        notes:            document.getElementById("f-notes").value.trim(),
+        group:            document.getElementById("f-group").value.trim(),
+        sent:             document.getElementById("f-sent").value,
+        reply:            document.getElementById("f-reply").value,
       };
-      if (!data.fullName) { alert("Full name is required."); return; }
+      if (!data.practiceName) { alert("Practice name is required."); return; }
 
       const saveBtn = document.getElementById("save-btn");
-      saveBtn.disabled = true;
-      saveBtn.textContent = "Saving…";
+      saveBtn.disabled = true; saveBtn.textContent = "Saving…";
 
       try {
         if (editingId) {
@@ -177,74 +194,72 @@
         }
         closeModal();
         await loadCustomers();
+        populateAreaFilter();
       } catch (e) {
         alert("Error saving: " + e.message);
       } finally {
-        saveBtn.disabled = false;
-        saveBtn.textContent = "Save";
+        saveBtn.disabled = false; saveBtn.textContent = "Save";
       }
     };
 
     window.deleteCustomer = async (id) => {
       const c = allCustomers.find(x => x.id === id);
-      if (!confirm(`Delete ${c?.fullName}? This cannot be undone.`)) return;
+      if (!confirm(`Delete ${c?.practiceName}? This cannot be undone.`)) return;
       await deleteDoc(doc(db, "customers", id));
       await loadCustomers();
+      populateAreaFilter();
     };
 
     function clearForm() {
-      ["f-fullName","f-email","f-location","f-spid","f-length","f-notes"].forEach(id => {
-        document.getElementById(id).value = "";
-      });
-      document.getElementById("f-progress").value = "Prospect";
+      ["f-area","f-practiceName","f-doctorName","f-organisationCode","f-postCode",
+       "f-addressLine1","f-icb","f-phone","f-practiceManager","f-emailCont","f-spid","f-group"]
+        .forEach(id => { document.getElementById(id).value = ""; });
+      document.getElementById("f-sent").value  = "No";
+      document.getElementById("f-reply").value = "No";
     }
 
-    // ── Import from Spreadsheet ────────────────────
+    // ── Import ─────────────────────────────────────
+    // Maps spreadsheet column headers → our field names
+    const COLUMN_MAP = {
+      area:             ["area"],
+      practiceName:     ["practice name","practicename","practice"],
+      doctorName:       ["doctor name","doctorname","doctor","dr name"],
+      organisationCode: ["organisation code","org code","organisationcode","orgcode","organisation"],
+      postCode:         ["post code","postcode","post_code","zip"],
+      addressLine1:     ["address line 1","address line1","addressline1","address 1","address"],
+      icb:              ["icb","integrated care board"],
+      phone:            ["phone","telephone","tel","contact number","phone number"],
+      practiceManager:  ["practice manager","practicemanager","manager"],
+      emailCont:        ["email cont.","email cont","email contact","email","e-mail","contact email"],
+      spid:             ["spid","supply point id","supply point","meter ref","mpan"],
+      group:            ["group"],
+      sent:             ["sent"],
+      reply:            ["reply","replied"],
+    };
+
     window.triggerImport = () => document.getElementById("import-file").click();
 
     window.handleImport = async (e) => {
       const file = e.target.files[0];
       if (!file) return;
-
       const ext = file.name.split(".").pop().toLowerCase();
-      if (!["csv","xlsx","xls"].includes(ext)) {
-        alert("Please upload a .csv, .xlsx, or .xls file.");
-        return;
-      }
+      if (!["csv","xlsx","xls","ods"].includes(ext)) { alert("Please upload a .csv, .xlsx, .xls, or .ods file."); return; }
 
       const statusEl = document.getElementById("import-status");
       statusEl.textContent = "Reading file…";
       statusEl.className = "import-status info";
 
       try {
-        let rows = [];
-        if (ext === "csv") {
-          rows = await parseCSV(file);
-        } else {
-          rows = await parseXLSX(file);
-        }
-
+        const rows = ext === "csv" ? await parseCSV(file) : await parseXLSX(file);
         if (!rows.length) { statusEl.textContent = "No data rows found."; return; }
 
-        // Column mapping — tries multiple common header names
-        const MAP = {
-          fullName:         ["full name","fullname","name","practice name","practice","gp practice","customer name"],
-          email:            ["email","email address","e-mail","contact email"],
-          location:         ["location","address","site address","town","city","postcode","site"],
-          spid:             ["spid","supply point id","supply point","meter ref","mpan"],
-          contractProgress: ["contract progress","progress","status","contract status","stage"],
-          contractLength:   ["contract length","length","term","contract term","duration"],
-          notes:            ["notes","note","comments","comment","additional info"],
-        };
-
         const headers = Object.keys(rows[0]).map(h => h.trim().toLowerCase());
-        const colIdx = {};
-        for (const [field, aliases] of Object.entries(MAP)) {
+        const colIdx  = {};
+        for (const [field, aliases] of Object.entries(COLUMN_MAP)) {
           colIdx[field] = aliases.find(a => headers.includes(a)) ?? null;
         }
 
         let imported = 0, skipped = 0;
-        const batch = [];
         for (const row of rows) {
           const norm = {};
           for (const [field, alias] of Object.entries(colIdx)) {
@@ -255,20 +270,16 @@
               norm[field] = "";
             }
           }
-          if (!norm.fullName && !norm.spid) { skipped++; continue; }
-          norm.contractProgress = norm.contractProgress || "Prospect";
+          if (!norm.practiceName && !norm.organisationCode) { skipped++; continue; }
           norm.importedAt = new Date().toISOString();
-          batch.push(norm);
-        }
-
-        for (const record of batch) {
-          await addDoc(collection(db, "customers"), record);
+          await addDoc(collection(db, "customers"), norm);
           imported++;
         }
 
-        statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""}${skipped ? ` (${skipped} skipped — no name or SPID)` : ""}.`;
+        statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""}${skipped ? ` (${skipped} skipped — no practice name or org code)` : ""}.`;
         statusEl.className = "import-status success";
         await loadCustomers();
+        populateAreaFilter();
       } catch (err) {
         statusEl.textContent = "Import failed: " + err.message;
         statusEl.className = "import-status error";
@@ -276,22 +287,19 @@
       e.target.value = "";
     };
 
-    // ── CSV Parser (native, no deps) ──────────────
     function parseCSV(file) {
       return new Promise((res, rej) => {
         const reader = new FileReader();
         reader.onload = e => {
-          const text  = e.target.result;
-          const lines = text.split(/\r?\n/).filter(l => l.trim());
+          const lines = e.target.result.split(/\r?\n/).filter(l => l.trim());
           if (lines.length < 2) { res([]); return; }
           const headers = csvSplit(lines[0]);
-          const rows = lines.slice(1).map(line => {
+          res(lines.slice(1).map(line => {
             const vals = csvSplit(line);
             const obj  = {};
             headers.forEach((h, i) => { obj[h] = vals[i] ?? ""; });
             return obj;
-          });
-          res(rows);
+          }));
         };
         reader.onerror = rej;
         reader.readAsText(file);
@@ -300,17 +308,15 @@
 
     function csvSplit(line) {
       const result = []; let cur = ""; let inQ = false;
-      for (let i = 0; i < line.length; i++) {
-        const ch = line[i];
-        if (ch === '"') { inQ = !inQ; }
+      for (const ch of line) {
+        if (ch === '"') inQ = !inQ;
         else if (ch === "," && !inQ) { result.push(cur.trim()); cur = ""; }
-        else { cur += ch; }
+        else cur += ch;
       }
       result.push(cur.trim());
       return result;
     }
 
-    // ── XLSX Parser (SheetJS via CDN) ─────────────
     function parseXLSX(file) {
       return new Promise((res, rej) => {
         if (!window.XLSX) { rej(new Error("XLSX library not loaded yet — try again in a moment.")); return; }
@@ -319,8 +325,7 @@
           try {
             const wb   = XLSX.read(e.target.result, { type: "array" });
             const ws   = wb.Sheets[wb.SheetNames[0]];
-            const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-            res(rows);
+            res(XLSX.utils.sheet_to_json(ws, { defval: "" }));
           } catch (err) { rej(err); }
         };
         reader.onerror = rej;
@@ -328,11 +333,13 @@
       });
     }
 
-    // ── Export to CSV ──────────────────────────────
+    // ── Export ─────────────────────────────────────
     window.exportCSV = () => {
-      const headers = ["Full Name","Email","Location","SPID","Contract Progress","Contract Length","Notes"];
-      const rows    = allCustomers.map(c => [
-        c.fullName, c.email, c.location, c.spid, c.contractProgress, c.contractLength, c.notes||""
+      const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Practice Manager","Email Cont.","SPID","Group","Sent","Reply"];
+      const rows = allCustomers.map(c => [
+        c.area, c.practiceName, c.doctorName, c.organisationCode, c.postCode,
+        c.addressLine1, c.icb, c.phone, c.practiceManager, c.emailCont,
+        c.spid, c.group, c.sent, c.reply
       ].map(v => `"${(v||"").replace(/"/g,'""')}"`));
       const csv  = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
       const blob = new Blob([csv], { type: "text/csv" });
@@ -345,7 +352,6 @@
       return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
     }
 
-    // Close modal on backdrop click
     window.addEventListener("DOMContentLoaded", () => {
       document.getElementById("modal").addEventListener("click", e => {
         if (e.target.id === "modal") closeModal();
@@ -353,132 +359,61 @@
     });
   </script>
 
-  <!-- SheetJS for XLSX support -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-
-  <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
   <style>
     :root {
-      --bg:       #0d1117;
-      --surface:  #161b22;
-      --border:   #21282f;
-      --accent:   #1e7aff;
-      --accent2:  #00c896;
-      --text:     #e6edf3;
-      --muted:    #7d8590;
-      --danger:   #f85149;
-      --warn:     #d29922;
-      --radius:   10px;
+      --bg:      #0d1117;
+      --surface: #161b22;
+      --border:  #21282f;
+      --accent:  #1e7aff;
+      --accent2: #00c896;
+      --text:    #e6edf3;
+      --muted:   #7d8590;
+      --danger:  #f85149;
+      --warn:    #d29922;
+      --radius:  10px;
     }
-
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body {
-      font-family: "DM Mono", monospace;
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      font-size: 13px;
-    }
-
+    body { font-family: "DM Mono", monospace; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 13px; }
     .hidden { display: none !important; }
 
-    /* ─── Auth Screen ─── */
-    #auth-screen {
-      display: flex; align-items: center; justify-content: center;
-      min-height: 100vh;
-      background: radial-gradient(ellipse at 60% 30%, #0a1f44 0%, #0d1117 70%);
-    }
-
-    .auth-card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 40px 36px;
-      width: 380px;
-      box-shadow: 0 24px 80px rgba(0,0,0,0.6);
-    }
-
-    .auth-logo {
-      font-family: "Syne", sans-serif;
-      font-size: 22px;
-      font-weight: 800;
-      color: var(--accent);
-      letter-spacing: -0.5px;
-      margin-bottom: 6px;
-    }
-    .auth-sub { color: var(--muted); font-size: 12px; margin-bottom: 28px; }
-
+    /* Auth */
+    #auth-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; background: radial-gradient(ellipse at 60% 30%, #0a1f44 0%, #0d1117 70%); }
+    .auth-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 40px 36px; width: 380px; box-shadow: 0 24px 80px rgba(0,0,0,0.6); }
+    .auth-logo { font-family: "Syne", sans-serif; font-size: 22px; font-weight: 800; color: var(--accent); margin-bottom: 6px; }
+    .auth-sub  { color: var(--muted); font-size: 12px; margin-bottom: 28px; }
     .auth-card label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; }
-    .auth-card input {
-      width: 100%; padding: 10px 12px;
-      background: var(--bg); border: 1px solid var(--border);
-      border-radius: var(--radius); color: var(--text); font-family: inherit;
-      font-size: 13px; margin-bottom: 14px; outline: none;
-      transition: border-color .2s;
-    }
+    .auth-card input { width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: inherit; font-size: 13px; margin-bottom: 14px; outline: none; transition: border-color .2s; }
     .auth-card input:focus { border-color: var(--accent); }
     #login-error { color: var(--danger); font-size: 12px; margin-bottom: 10px; min-height: 16px; }
 
-    /* ─── App Shell ─── */
+    /* App shell */
     #app-screen { display: flex; flex-direction: column; min-height: 100vh; }
-
-    header {
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
-      padding: 0 28px;
-      height: 56px;
-      display: flex; align-items: center; justify-content: space-between;
-      position: sticky; top: 0; z-index: 50;
-    }
-
-    .logo {
-      font-family: "Syne", sans-serif;
-      font-size: 18px; font-weight: 800;
-      color: var(--text);
-      letter-spacing: -0.5px;
-    }
+    header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 28px; height: 56px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 50; }
+    .logo { font-family: "Syne", sans-serif; font-size: 18px; font-weight: 800; color: var(--text); }
     .logo span { color: var(--accent); }
-
     .header-right { display: flex; align-items: center; gap: 16px; }
     #user-email { color: var(--muted); font-size: 12px; }
 
-    /* ─── Buttons ─── */
-    .btn {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 8px 16px; border-radius: var(--radius);
-      font-family: inherit; font-size: 12px; font-weight: 500;
-      cursor: pointer; border: none; transition: filter .15s, opacity .15s;
-    }
-    .btn:hover { filter: brightness(1.1); }
-    .btn:active { opacity: .85; }
-    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    /* Buttons */
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: var(--radius); font-family: inherit; font-size: 12px; cursor: pointer; border: none; transition: filter .15s, opacity .15s; }
+    .btn:hover { filter: brightness(1.1); } .btn:active { opacity: .85; } .btn:disabled { opacity: .5; cursor: not-allowed; }
     .btn-primary   { background: var(--accent);  color: #fff; }
     .btn-secondary { background: var(--border);  color: var(--text); }
-    .btn-success   { background: var(--accent2); color: #000; }
-    .btn-danger    { background: var(--danger);  color: #fff; }
     .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
-
-    .btn-icon {
-      background: transparent; border: none; cursor: pointer;
-      font-size: 14px; padding: 4px 6px; border-radius: 6px;
-      transition: background .15s;
-    }
+    .btn-icon { background: transparent; border: none; cursor: pointer; font-size: 14px; padding: 4px 6px; border-radius: 6px; transition: background .15s; }
     .edit-btn { color: var(--accent); } .edit-btn:hover { background: rgba(30,122,255,.12); }
     .del-btn  { color: var(--danger); } .del-btn:hover  { background: rgba(248,81,73,.12); }
 
-    /* ─── Main ─── */
-    main { flex: 1; padding: 24px 28px; max-width: 1400px; width: 100%; margin: 0 auto; }
+    /* Main */
+    main { flex: 1; padding: 24px 28px; width: 100%; margin: 0 auto; }
 
     /* Stats */
     .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
-    .stat-card {
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 16px 20px;
-    }
+    .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; }
     .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
     .stat-value { font-family: "Syne", sans-serif; font-size: 28px; font-weight: 700; }
     .stat-value.blue  { color: var(--accent); }
@@ -487,16 +422,8 @@
     .stat-value.muted { color: var(--muted); }
 
     /* Toolbar */
-    .toolbar {
-      display: flex; align-items: center; gap: 10px;
-      margin-bottom: 16px; flex-wrap: wrap;
-    }
-    .toolbar input, .toolbar select {
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--radius); color: var(--text);
-      padding: 8px 12px; font-family: inherit; font-size: 12px;
-      outline: none; transition: border-color .2s;
-    }
+    .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+    .toolbar input, .toolbar select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 8px 12px; font-family: inherit; font-size: 12px; outline: none; transition: border-color .2s; }
     .toolbar input { flex: 1; min-width: 200px; }
     .toolbar input:focus, .toolbar select:focus { border-color: var(--accent); }
     .toolbar select option { background: var(--surface); }
@@ -506,103 +433,56 @@
     .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
     table { width: 100%; border-collapse: collapse; }
     thead { background: var(--surface); }
-    th {
-      padding: 10px 14px; text-align: left;
-      font-size: 10px; font-weight: 600; letter-spacing: .08em;
-      text-transform: uppercase; color: var(--muted);
-      border-bottom: 1px solid var(--border); white-space: nowrap;
-    }
-    td {
-      padding: 11px 14px; font-size: 12px;
-      border-bottom: 1px solid var(--border);
-      vertical-align: middle; max-width: 200px;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
+    th { padding: 10px 14px; text-align: left; font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); white-space: nowrap; }
+    td { padding: 10px 14px; font-size: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     tr:last-child td { border-bottom: none; }
-    tbody tr { transition: background .12s; }
     tbody tr:hover { background: rgba(255,255,255,.03); }
     .empty-row { text-align: center; color: var(--muted); padding: 40px; }
 
     /* Badges */
-    .badge {
-      display: inline-block; padding: 3px 8px; border-radius: 100px;
-      font-size: 10px; font-weight: 600; letter-spacing: .04em;
-    }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 100px; font-size: 10px; font-weight: 600; }
     .badge-prospect   { background: rgba(125,133,144,.15); color: var(--muted); }
-    .badge-inprogress { background: rgba(210,153,34,.15);  color: var(--warn); }
     .badge-signed     { background: rgba(0,200,150,.15);   color: var(--accent2); }
     .badge-completed  { background: rgba(30,122,255,.15);  color: var(--accent); }
-    .badge-cancelled  { background: rgba(248,81,73,.15);   color: var(--danger); }
 
     /* Import status */
-    .import-status {
-      font-size: 12px; padding: 8px 14px;
-      border-radius: var(--radius); margin-top: 8px;
-    }
+    .import-status { font-size: 12px; padding: 8px 14px; border-radius: var(--radius); margin-top: 8px; }
     .import-status.info    { background: rgba(30,122,255,.1); color: var(--accent); }
     .import-status.success { background: rgba(0,200,150,.1);  color: var(--accent2); }
     .import-status.error   { background: rgba(248,81,73,.1);  color: var(--danger); }
 
-    /* ─── Modal ─── */
-    #modal {
-      position: fixed; inset: 0; background: rgba(0,0,0,.65);
-      display: flex; align-items: center; justify-content: center;
-      z-index: 100; backdrop-filter: blur(4px);
-    }
-
-    .modal-card {
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 14px; padding: 28px 32px; width: 520px; max-width: 95vw;
-      max-height: 90vh; overflow-y: auto;
-      box-shadow: 0 32px 100px rgba(0,0,0,.6);
-    }
-
-    .modal-card h2 {
-      font-family: "Syne", sans-serif; font-size: 18px; font-weight: 700;
-      margin-bottom: 20px;
-    }
-
+    /* Modal */
+    #modal { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: flex; align-items: center; justify-content: center; z-index: 100; backdrop-filter: blur(4px); }
+    .modal-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px 32px; width: 640px; max-width: 95vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 32px 100px rgba(0,0,0,.6); }
+    .modal-card h2 { font-family: "Syne", sans-serif; font-size: 18px; font-weight: 700; margin-bottom: 20px; }
     .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .form-group { margin-bottom: 14px; }
     .form-group.full { grid-column: 1 / -1; }
     .form-group label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 5px; }
-    .form-group input, .form-group select, .form-group textarea {
-      width: 100%; padding: 9px 12px;
-      background: var(--bg); border: 1px solid var(--border);
-      border-radius: var(--radius); color: var(--text); font-family: inherit;
-      font-size: 13px; outline: none; transition: border-color .2s;
-    }
-    .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
-      border-color: var(--accent);
-    }
+    .form-group input, .form-group select { width: 100%; padding: 9px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: inherit; font-size: 13px; outline: none; transition: border-color .2s; }
+    .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
     .form-group select option { background: var(--surface); }
-    .form-group textarea { resize: vertical; min-height: 70px; }
-
-    .modal-footer {
-      display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px;
-    }
+    .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
   </style>
 </head>
 <body>
 
-<!-- ── Auth Screen ──────────────────────────────── -->
+<!-- Auth -->
 <div id="auth-screen">
   <div class="auth-card">
     <div class="auth-logo">URwater CRM</div>
-    <div class="auth-sub">Water retail account management</div>
-    <label for="login-email">Email address</label>
+    <div class="auth-sub">GP Practice water account management</div>
+    <label>Email address</label>
     <input id="login-email" type="email" placeholder="you@urwater.co.uk" />
-    <label for="login-password">Password</label>
-    <input id="login-password" type="password" placeholder="••••••••"
-           onkeydown="if(event.key==='Enter')login()" />
+    <label>Password</label>
+    <input id="login-password" type="password" placeholder="••••••••" onkeydown="if(event.key==='Enter')login()" />
     <div id="login-error"></div>
     <button class="btn btn-primary" style="width:100%" onclick="login()">Sign In →</button>
   </div>
 </div>
 
-<!-- ── App Screen ────────────────────────────────── -->
+<!-- App -->
 <div id="app-screen" class="hidden">
-
   <header>
     <div class="logo">UR<span>water</span> CRM</div>
     <div class="header-right">
@@ -612,113 +492,125 @@
   </header>
 
   <main>
-
-    <!-- Stats -->
     <div class="stats">
-      <div class="stat-card">
-        <div class="stat-label">Total Accounts</div>
-        <div class="stat-value blue" id="stat-total">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Signed</div>
-        <div class="stat-value green" id="stat-signed">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">In Progress</div>
-        <div class="stat-value warn" id="stat-progress">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Prospects</div>
-        <div class="stat-value muted" id="stat-prospect">—</div>
-      </div>
+      <div class="stat-card"><div class="stat-label">Total Practices</div><div class="stat-value blue" id="stat-total">—</div></div>
+      <div class="stat-card"><div class="stat-label">Emails Sent</div><div class="stat-value green" id="stat-sent">—</div></div>
+      <div class="stat-card"><div class="stat-label">Replies Received</div><div class="stat-value warn" id="stat-reply">—</div></div>
+      <div class="stat-card"><div class="stat-label">Areas Covered</div><div class="stat-value muted" id="stat-areas">—</div></div>
     </div>
 
-    <!-- Toolbar -->
     <div class="toolbar">
-      <input id="search-input" type="text" placeholder="Search name, email, location, SPID…"
-             oninput="filterTable()" />
-      <select id="progress-filter" onchange="filterTable()">
-        <option value="">All stages</option>
-        <option>Prospect</option>
-        <option>In Progress</option>
-        <option>Signed</option>
-        <option>Completed</option>
-        <option>Cancelled</option>
+      <input id="search-input" type="text" placeholder="Search practice, doctor, postcode, SPID, org code…" oninput="filterTable()" />
+      <select id="area-filter" onchange="filterTable()"><option value="">All areas</option></select>
+      <select id="sent-filter" onchange="filterTable()">
+        <option value="">Sent: All</option>
+        <option>Yes</option>
+        <option>No</option>
       </select>
       <div class="toolbar-spacer"></div>
       <button class="btn btn-secondary" onclick="triggerImport()">⬆ Import</button>
       <button class="btn btn-secondary" onclick="exportCSV()">⬇ Export CSV</button>
-      <button class="btn btn-primary" onclick="openAdd()">+ Add Customer</button>
+      <button class="btn btn-primary" onclick="openAdd()">+ Add Practice</button>
     </div>
 
-    <!-- Hidden import input -->
-    <input type="file" id="import-file" accept=".csv,.xlsx,.xls"
-           class="hidden" onchange="handleImport(event)" />
+    <input type="file" id="import-file" accept=".csv,.xlsx,.xls,.ods" class="hidden" onchange="handleImport(event)" />
     <div id="import-status"></div>
 
-    <!-- Table -->
     <div class="table-wrap" style="margin-top:10px">
       <table>
         <thead>
           <tr>
-            <th>Full Name</th>
+            <th>Area</th>
+            <th>Practice Name</th>
+            <th>Doctor Name</th>
+            <th>Org Code</th>
+            <th>Post Code</th>
+            <th>Address</th>
+            <th>ICB</th>
+            <th>Phone</th>
+            <th>Practice Manager</th>
             <th>Email</th>
-            <th>Location</th>
             <th>SPID</th>
-            <th>Contract Progress</th>
-            <th>Contract Length</th>
-            <th>Notes</th>
-            <th>Date Added</th>
+            <th>Group</th>
+            <th>Sent</th>
+            <th>Reply</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody id="customer-tbody">
-          <tr><td colspan="9" class="empty-row">Loading…</td></tr>
+          <tr><td colspan="15" class="empty-row">Loading…</td></tr>
         </tbody>
       </table>
     </div>
-
   </main>
 </div>
 
-<!-- ── Add / Edit Modal ───────────────────────────── -->
+<!-- Modal -->
 <div id="modal" class="hidden">
   <div class="modal-card">
-    <h2 id="modal-title">Add Customer</h2>
+    <h2 id="modal-title">Add Practice</h2>
     <div class="form-row">
       <div class="form-group">
-        <label>Full Name *</label>
-        <input id="f-fullName" type="text" placeholder="Dr Jane Smith" />
+        <label>Area</label>
+        <input id="f-area" type="text" placeholder="e.g. Yorkshire" />
       </div>
       <div class="form-group">
-        <label>Email</label>
-        <input id="f-email" type="email" placeholder="jane@practice.nhs.uk" />
+        <label>Practice Name *</label>
+        <input id="f-practiceName" type="text" placeholder="Kirkgate Medical Centre" />
       </div>
       <div class="form-group">
-        <label>Location / Address</label>
-        <input id="f-location" type="text" placeholder="Leeds, LS1 4AP" />
+        <label>Doctor Name</label>
+        <input id="f-doctorName" type="text" placeholder="Dr Jane Smith" />
+      </div>
+      <div class="form-group">
+        <label>Organisation Code</label>
+        <input id="f-organisationCode" type="text" placeholder="B82005" />
+      </div>
+      <div class="form-group">
+        <label>Post Code</label>
+        <input id="f-postCode" type="text" placeholder="LS1 4AP" />
+      </div>
+      <div class="form-group">
+        <label>Address Line 1</label>
+        <input id="f-addressLine1" type="text" placeholder="12 High Street" />
+      </div>
+      <div class="form-group">
+        <label>ICB</label>
+        <input id="f-icb" type="text" placeholder="West Yorkshire ICB" />
+      </div>
+      <div class="form-group">
+        <label>Phone</label>
+        <input id="f-phone" type="text" placeholder="01134 000000" />
+      </div>
+      <div class="form-group">
+        <label>Practice Manager</label>
+        <input id="f-practiceManager" type="text" placeholder="John Doe" />
+      </div>
+      <div class="form-group">
+        <label>Email Contact</label>
+        <input id="f-emailCont" type="email" placeholder="manager@practice.nhs.uk" />
       </div>
       <div class="form-group">
         <label>SPID</label>
-        <input id="f-spid" type="text" placeholder="1234567890W" />
+        <input id="f-spid" type="text" placeholder="3006153308 or EFW289998-0" />
       </div>
       <div class="form-group">
-        <label>Contract Progress</label>
-        <select id="f-progress">
-          <option>Prospect</option>
-          <option>In Progress</option>
-          <option>Signed</option>
-          <option>Completed</option>
-          <option>Cancelled</option>
+        <label>Group</label>
+        <input id="f-group" type="text" placeholder="e.g. PCN North" />
+      </div>
+      <div class="form-group">
+        <label>Sent</label>
+        <select id="f-sent">
+          <option>No</option>
+          <option>Yes</option>
         </select>
       </div>
       <div class="form-group">
-        <label>Contract Length</label>
-        <input id="f-length" type="text" placeholder="e.g. 12 months" />
-      </div>
-      <div class="form-group full">
-        <label>Notes</label>
-        <textarea id="f-notes" placeholder="Any additional notes…"></textarea>
+        <label>Reply</label>
+        <select id="f-reply">
+          <option>No</option>
+          <option>Yes</option>
+        </select>
       </div>
     </div>
     <div class="modal-footer">
