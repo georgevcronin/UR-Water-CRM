@@ -8,7 +8,7 @@
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import {
-      getFirestore, collection, addDoc, getDocs, getDoc, doc, updateDoc, deleteDoc, writeBatch, limit, query
+      getFirestore, collection, addDoc, getDocs, getDoc, doc, updateDoc, deleteDoc, writeBatch, query
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
     import {
       getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
@@ -739,9 +739,6 @@
 
     <div id="limit-warning" style="display:none;background:rgba(248,81,73,.1);color:#f85149;padding:10px 14px;border-radius:10px;font-size:12px;margin-bottom:10px;">
       ⚠ Over 1,000 records detected — only showing the first 1,000. Please delete duplicate records in Firebase Console.
-    </div>
-    <div id="limit-warning" style="display:none;background:rgba(248,81,73,.1);color:#f85149;padding:10px 14px;border-radius:10px;font-size:12px;margin-bottom:10px;">
-      ⚠ Showing first 50 records. Use search or filters to find specific records, or use Next to browse.
     </div>
     <div class="table-wrap" style="margin-top:10px">
       <table>
