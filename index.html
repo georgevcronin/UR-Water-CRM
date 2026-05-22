@@ -8,7 +8,7 @@
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import {
-      getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, query, orderBy
+      getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, writeBatch
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
     import {
       getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
@@ -59,11 +59,19 @@
 
     // ── Load & Render ──────────────────────────────
     async function loadCustomers() {
-      const q    = query(collection(db, "customers"), orderBy("practiceName"));
-      const snap = await getDocs(q);
-      allCustomers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      renderTable(allCustomers);
-      updateStats(allCustomers);
+      document.getElementById("customer-tbody").innerHTML =
+        `<tr><td colspan="15" class="empty-row" style="color:var(--accent)">Loading records…</td></tr>`;
+      try {
+        const snap = await getDocs(collection(db, "customers"));
+        allCustomers = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+          .sort((a, b) => (a.practiceName || "").localeCompare(b.practiceName || ""));
+        renderTable(allCustomers);
+        updateStats(allCustomers);
+        populateAreaFilter();
+      } catch (e) {
+        document.getElementById("customer-tbody").innerHTML =
+          `<tr><td colspan="15" class="empty-row" style="color:var(--danger)">Failed to load: ${e.message}</td></tr>`;
+      }
     }
 
     function renderTable(data) {
@@ -261,6 +269,7 @@
         }
 
         let imported = 0, skipped = 0;
+        const validRecords = [];
         for (const row of rows) {
           const norm = {};
           for (const [field, alias] of Object.entries(colIdx)) {
@@ -274,8 +283,18 @@
           if (!norm.practiceName && !norm.organisationCode) { skipped++; continue; }
           if (norm.sent) norm.sent = excelDateToString(norm.sent);
           norm.importedAt = new Date().toISOString();
-          await addDoc(collection(db, "customers"), norm);
-          imported++;
+          validRecords.push(norm);
+        }
+
+        // Write in batches of 499 (Firestore max is 500)
+        const BATCH_SIZE = 499;
+        for (let i = 0; i < validRecords.length; i += BATCH_SIZE) {
+          const batch = writeBatch(db);
+          validRecords.slice(i, i + BATCH_SIZE).forEach(record => {
+            batch.set(doc(collection(db, "customers")), record);
+          });
+          await batch.commit();
+          imported += Math.min(BATCH_SIZE, validRecords.length - i);
         }
 
         statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""}${skipped ? ` (${skipped} skipped — no practice name or org code)` : ""}.`;
