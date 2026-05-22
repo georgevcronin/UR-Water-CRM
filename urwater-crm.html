@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>URwater CRM</title>
+
+  <!-- Firebase SDK -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import {
+      getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, query, orderBy
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    import {
+      getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+    // ─────────────────────────────────────────────
+    // 🔧 REPLACE THESE WITH YOUR FIREBASE CONFIG
+    // ─────────────────────────────────────────────
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT.firebaseapp.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+
+    const app  = initializeApp(firebaseConfig);
+    const db   = getFirestore(app);
+    const auth = getAuth(app);
+
+    // ── State ──────────────────────────────────────
+    let allCustomers = [];
+    let editingId    = null;
+
+    // ── Auth ───────────────────────────────────────
+    onAuthStateChanged(auth, user => {
+      if (user) {
+        document.getElementById("auth-screen").classList.add("hidden");
+        document.getElementById("app-screen").classList.remove("hidden");
+        document.getElementById("user-email").textContent = user.email;
+        loadCustomers();
+      } else {
+        document.getElementById("auth-screen").classList.remove("hidden");
+        document.getElementById("app-screen").classList.add("hidden");
+      }
+    });
+
+    window.login = async () => {
+      const email    = document.getElementById("login-email").value.trim();
+      const password = document.getElementById("login-password").value;
+      const errEl    = document.getElementById("login-error");
+      errEl.textContent = "";
+      try {
+        await signInWithEmailAndPassword(auth, email, password);
+      } catch (e) {
+        errEl.textContent = "Invalid credentials. Please try again.";
+      }
+    };
+
+    window.logout = () => signOut(auth);
+
+    // ── Load & Render ──────────────────────────────
+    async function loadCustomers() {
+      const q    = query(collection(db, "customers"), orderBy("fullName"));
+      const snap = await getDocs(q);
+      allCustomers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      renderTable(allCustomers);
+      updateStats(allCustomers);
+    }
+
+    function renderTable(data) {
+      const tbody = document.getElementById("customer-tbody");
+      tbody.innerHTML = "";
+      if (!data.length) {
+        tbody.innerHTML = `<tr><td colspan="9" class="empty-row">No customers yet. Add one or import a spreadsheet.</td></tr>`;
+        return;
+      }
+      data.forEach(c => {
+        const progressClass = {
+          "Prospect": "badge-prospect",
+          "In Progress": "badge-inprogress",
+          "Signed": "badge-signed",
+          "Completed": "badge-completed",
+          "Cancelled": "badge-cancelled"
+        }[c.contractProgress] || "badge-prospect";
+
+        tbody.innerHTML += `
+          <tr>
+            <td>${esc(c.fullName)}</td>
+            <td>${esc(c.email)}</td>
+            <td>${esc(c.location)}</td>
+            <td>${esc(c.spid)}</td>
+            <td><span class="badge ${progressClass}">${esc(c.contractProgress)}</span></td>
+            <td>${esc(c.contractLength)}</td>
+            <td>${esc(c.notes || "—")}</td>
+            <td>${c.importedAt ? new Date(c.importedAt).toLocaleDateString("en-GB") : (c.createdAt ? new Date(c.createdAt.toDate ? c.createdAt.toDate() : c.createdAt).toLocaleDateString("en-GB") : "—")}</td>
+            <td class="action-cell">
+              <button class="btn-icon edit-btn" onclick="openEdit('${c.id}')">✎</button>
+              <button class="btn-icon del-btn" onclick="deleteCustomer('${c.id}')">✕</button>
+            </td>
+          </tr>`;
+      });
+    }
+
+    function updateStats(data) {
+      document.getElementById("stat-total").textContent   = data.length;
+      document.getElementById("stat-signed").textContent  = data.filter(c => c.contractProgress === "Signed").length;
+      document.getElementById("stat-progress").textContent= data.filter(c => c.contractProgress === "In Progress").length;
+      document.getElementById("stat-prospect").textContent= data.filter(c => c.contractProgress === "Prospect").length;
+    }
+
+    // ── Search & Filter ────────────────────────────
+    window.filterTable = () => {
+      const q  = document.getElementById("search-input").value.toLowerCase();
+      const pf = document.getElementById("progress-filter").value;
+      let filtered = allCustomers.filter(c => {
+        const matchQ = !q || [c.fullName, c.email, c.location, c.spid].some(f => (f||"").toLowerCase().includes(q));
+        const matchP = !pf || c.contractProgress === pf;
+        return matchQ && matchP;
+      });
+      renderTable(filtered);
+    };
+
+    // ── Add / Edit ─────────────────────────────────
+    window.openAdd = () => {
+      editingId = null;
+      document.getElementById("modal-title").textContent = "Add Customer";
+      clearForm();
+      document.getElementById("modal").classList.remove("hidden");
+    };
+
+    window.openEdit = (id) => {
+      editingId = id;
+      const c = allCustomers.find(x => x.id === id);
+      if (!c) return;
+      document.getElementById("modal-title").textContent = "Edit Customer";
+      document.getElementById("f-fullName").value         = c.fullName || "";
+      document.getElementById("f-email").value            = c.email || "";
+      document.getElementById("f-location").value         = c.location || "";
+      document.getElementById("f-spid").value             = c.spid || "";
+      document.getElementById("f-progress").value         = c.contractProgress || "Prospect";
+      document.getElementById("f-length").value           = c.contractLength || "";
+      document.getElementById("f-notes").value            = c.notes || "";
+      document.getElementById("modal").classList.remove("hidden");
+    };
+
+    window.closeModal = () => {
+      document.getElementById("modal").classList.add("hidden");
+      editingId = null;
+    };
+
+    window.saveCustomer = async () => {
+      const data = {
+        fullName:         document.getElementById("f-fullName").value.trim(),
+        email:            document.getElementById("f-email").value.trim(),
+        location:         document.getElementById("f-location").value.trim(),
+        spid:             document.getElementById("f-spid").value.trim(),
+        contractProgress: document.getElementById("f-progress").value,
+        contractLength:   document.getElementById("f-length").value.trim(),
+        notes:            document.getElementById("f-notes").value.trim(),
+      };
+      if (!data.fullName) { alert("Full name is required."); return; }
+
+      const saveBtn = document.getElementById("save-btn");
+      saveBtn.disabled = true;
+      saveBtn.textContent = "Saving…";
+
+      try {
+        if (editingId) {
+          await updateDoc(doc(db, "customers", editingId), data);
+        } else {
+          data.createdAt = new Date();
+          await addDoc(collection(db, "customers"), data);
+        }
+        closeModal();
+        await loadCustomers();
+      } catch (e) {
+        alert("Error saving: " + e.message);
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Save";
+      }
+    };
+
+    window.deleteCustomer = async (id) => {
+      const c = allCustomers.find(x => x.id === id);
+      if (!confirm(`Delete ${c?.fullName}? This cannot be undone.`)) return;
+      await deleteDoc(doc(db, "customers", id));
+      await loadCustomers();
+    };
+
+    function clearForm() {
+      ["f-fullName","f-email","f-location","f-spid","f-length","f-notes"].forEach(id => {
+        document.getElementById(id).value = "";
+      });
+      document.getElementById("f-progress").value = "Prospect";
+    }
+
+    // ── Import from Spreadsheet ────────────────────
+    window.triggerImport = () => document.getElementById("import-file").click();
+
+    window.handleImport = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const ext = file.name.split(".").pop().toLowerCase();
+      if (!["csv","xlsx","xls"].includes(ext)) {
+        alert("Please upload a .csv, .xlsx, or .xls file.");
+        return;
+      }
+
+      const statusEl = document.getElementById("import-status");
+      statusEl.textContent = "Reading file…";
+      statusEl.className = "import-status info";
+
+      try {
+        let rows = [];
+        if (ext === "csv") {
+          rows = await parseCSV(file);
+        } else {
+          rows = await parseXLSX(file);
+        }
+
+        if (!rows.length) { statusEl.textContent = "No data rows found."; return; }
+
+        // Column mapping — tries multiple common header names
+        const MAP = {
+          fullName:         ["full name","fullname","name","practice name","practice","gp practice","customer name"],
+          email:            ["email","email address","e-mail","contact email"],
+          location:         ["location","address","site address","town","city","postcode","site"],
+          spid:             ["spid","supply point id","supply point","meter ref","mpan"],
+          contractProgress: ["contract progress","progress","status","contract status","stage"],
+          contractLength:   ["contract length","length","term","contract term","duration"],
+          notes:            ["notes","note","comments","comment","additional info"],
+        };
+
+        const headers = Object.keys(rows[0]).map(h => h.trim().toLowerCase());
+        const colIdx = {};
+        for (const [field, aliases] of Object.entries(MAP)) {
+          colIdx[field] = aliases.find(a => headers.includes(a)) ?? null;
+        }
+
+        let imported = 0, skipped = 0;
+        const batch = [];
+        for (const row of rows) {
+          const norm = {};
+          for (const [field, alias] of Object.entries(colIdx)) {
+            if (alias) {
+              const rawKey = Object.keys(row).find(k => k.trim().toLowerCase() === alias);
+              norm[field] = rawKey ? (row[rawKey]||"").toString().trim() : "";
+            } else {
+              norm[field] = "";
+            }
+          }
+          if (!norm.fullName && !norm.spid) { skipped++; continue; }
+          norm.contractProgress = norm.contractProgress || "Prospect";
+          norm.importedAt = new Date().toISOString();
+          batch.push(norm);
+        }
+
+        for (const record of batch) {
+          await addDoc(collection(db, "customers"), record);
+          imported++;
+        }
+
+        statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""}${skipped ? ` (${skipped} skipped — no name or SPID)` : ""}.`;
+        statusEl.className = "import-status success";
+        await loadCustomers();
+      } catch (err) {
+        statusEl.textContent = "Import failed: " + err.message;
+        statusEl.className = "import-status error";
+      }
+      e.target.value = "";
+    };
+
+    // ── CSV Parser (native, no deps) ──────────────
+    function parseCSV(file) {
+      return new Promise((res, rej) => {
+        const reader = new FileReader();
+        reader.onload = e => {
+          const text  = e.target.result;
+          const lines = text.split(/\r?\n/).filter(l => l.trim());
+          if (lines.length < 2) { res([]); return; }
+          const headers = csvSplit(lines[0]);
+          const rows = lines.slice(1).map(line => {
+            const vals = csvSplit(line);
+            const obj  = {};
+            headers.forEach((h, i) => { obj[h] = vals[i] ?? ""; });
+            return obj;
+          });
+          res(rows);
+        };
+        reader.onerror = rej;
+        reader.readAsText(file);
+      });
+    }
+
+    function csvSplit(line) {
+      const result = []; let cur = ""; let inQ = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') { inQ = !inQ; }
+        else if (ch === "," && !inQ) { result.push(cur.trim()); cur = ""; }
+        else { cur += ch; }
+      }
+      result.push(cur.trim());
+      return result;
+    }
+
+    // ── XLSX Parser (SheetJS via CDN) ─────────────
+    function parseXLSX(file) {
+      return new Promise((res, rej) => {
+        if (!window.XLSX) { rej(new Error("XLSX library not loaded yet — try again in a moment.")); return; }
+        const reader = new FileReader();
+        reader.onload = e => {
+          try {
+            const wb   = XLSX.read(e.target.result, { type: "array" });
+            const ws   = wb.Sheets[wb.SheetNames[0]];
+            const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+            res(rows);
+          } catch (err) { rej(err); }
+        };
+        reader.onerror = rej;
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    // ── Export to CSV ──────────────────────────────
+    window.exportCSV = () => {
+      const headers = ["Full Name","Email","Location","SPID","Contract Progress","Contract Length","Notes"];
+      const rows    = allCustomers.map(c => [
+        c.fullName, c.email, c.location, c.spid, c.contractProgress, c.contractLength, c.notes||""
+      ].map(v => `"${(v||"").replace(/"/g,'""')}"`));
+      const csv  = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+      const blob = new Blob([csv], { type: "text/csv" });
+      const a    = document.createElement("a"); a.href = URL.createObjectURL(blob);
+      a.download = `urwater-crm-${new Date().toISOString().slice(0,10)}.csv`;
+      a.click();
+    };
+
+    function esc(s) {
+      return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    // Close modal on backdrop click
+    document.getElementById("modal").addEventListener("click", e => {
+      if (e.target.id === "modal") closeModal();
+    });
+  </script>
+
+  <!-- SheetJS for XLSX support -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <style>
+    :root {
+      --bg:       #0d1117;
+      --surface:  #161b22;
+      --border:   #21282f;
+      --accent:   #1e7aff;
+      --accent2:  #00c896;
+      --text:     #e6edf3;
+      --muted:    #7d8590;
+      --danger:   #f85149;
+      --warn:     #d29922;
+      --radius:   10px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "DM Mono", monospace;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      font-size: 13px;
+    }
+
+    .hidden { display: none !important; }
+
+    /* ─── Auth Screen ─── */
+    #auth-screen {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh;
+      background: radial-gradient(ellipse at 60% 30%, #0a1f44 0%, #0d1117 70%);
+    }
+
+    .auth-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 40px 36px;
+      width: 380px;
+      box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+    }
+
+    .auth-logo {
+      font-family: "Syne", sans-serif;
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--accent);
+      letter-spacing: -0.5px;
+      margin-bottom: 6px;
+    }
+    .auth-sub { color: var(--muted); font-size: 12px; margin-bottom: 28px; }
+
+    .auth-card label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+    .auth-card input {
+      width: 100%; padding: 10px 12px;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-family: inherit;
+      font-size: 13px; margin-bottom: 14px; outline: none;
+      transition: border-color .2s;
+    }
+    .auth-card input:focus { border-color: var(--accent); }
+    #login-error { color: var(--danger); font-size: 12px; margin-bottom: 10px; min-height: 16px; }
+
+    /* ─── App Shell ─── */
+    #app-screen { display: flex; flex-direction: column; min-height: 100vh; }
+
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 28px;
+      height: 56px;
+      display: flex; align-items: center; justify-content: space-between;
+      position: sticky; top: 0; z-index: 50;
+    }
+
+    .logo {
+      font-family: "Syne", sans-serif;
+      font-size: 18px; font-weight: 800;
+      color: var(--text);
+      letter-spacing: -0.5px;
+    }
+    .logo span { color: var(--accent); }
+
+    .header-right { display: flex; align-items: center; gap: 16px; }
+    #user-email { color: var(--muted); font-size: 12px; }
+
+    /* ─── Buttons ─── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 16px; border-radius: var(--radius);
+      font-family: inherit; font-size: 12px; font-weight: 500;
+      cursor: pointer; border: none; transition: filter .15s, opacity .15s;
+    }
+    .btn:hover { filter: brightness(1.1); }
+    .btn:active { opacity: .85; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary   { background: var(--accent);  color: #fff; }
+    .btn-secondary { background: var(--border);  color: var(--text); }
+    .btn-success   { background: var(--accent2); color: #000; }
+    .btn-danger    { background: var(--danger);  color: #fff; }
+    .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+
+    .btn-icon {
+      background: transparent; border: none; cursor: pointer;
+      font-size: 14px; padding: 4px 6px; border-radius: 6px;
+      transition: background .15s;
+    }
+    .edit-btn { color: var(--accent); } .edit-btn:hover { background: rgba(30,122,255,.12); }
+    .del-btn  { color: var(--danger); } .del-btn:hover  { background: rgba(248,81,73,.12); }
+
+    /* ─── Main ─── */
+    main { flex: 1; padding: 24px 28px; max-width: 1400px; width: 100%; margin: 0 auto; }
+
+    /* Stats */
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+    .stat-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px 20px;
+    }
+    .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+    .stat-value { font-family: "Syne", sans-serif; font-size: 28px; font-weight: 700; }
+    .stat-value.blue  { color: var(--accent); }
+    .stat-value.green { color: var(--accent2); }
+    .stat-value.warn  { color: var(--warn); }
+    .stat-value.muted { color: var(--muted); }
+
+    /* Toolbar */
+    .toolbar {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 16px; flex-wrap: wrap;
+    }
+    .toolbar input, .toolbar select {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text);
+      padding: 8px 12px; font-family: inherit; font-size: 12px;
+      outline: none; transition: border-color .2s;
+    }
+    .toolbar input { flex: 1; min-width: 200px; }
+    .toolbar input:focus, .toolbar select:focus { border-color: var(--accent); }
+    .toolbar select option { background: var(--surface); }
+    .toolbar-spacer { flex: 1; }
+
+    /* Table */
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+    table { width: 100%; border-collapse: collapse; }
+    thead { background: var(--surface); }
+    th {
+      padding: 10px 14px; text-align: left;
+      font-size: 10px; font-weight: 600; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--muted);
+      border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    td {
+      padding: 11px 14px; font-size: 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle; max-width: 200px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    tr:last-child td { border-bottom: none; }
+    tbody tr { transition: background .12s; }
+    tbody tr:hover { background: rgba(255,255,255,.03); }
+    .empty-row { text-align: center; color: var(--muted); padding: 40px; }
+
+    /* Badges */
+    .badge {
+      display: inline-block; padding: 3px 8px; border-radius: 100px;
+      font-size: 10px; font-weight: 600; letter-spacing: .04em;
+    }
+    .badge-prospect   { background: rgba(125,133,144,.15); color: var(--muted); }
+    .badge-inprogress { background: rgba(210,153,34,.15);  color: var(--warn); }
+    .badge-signed     { background: rgba(0,200,150,.15);   color: var(--accent2); }
+    .badge-completed  { background: rgba(30,122,255,.15);  color: var(--accent); }
+    .badge-cancelled  { background: rgba(248,81,73,.15);   color: var(--danger); }
+
+    /* Import status */
+    .import-status {
+      font-size: 12px; padding: 8px 14px;
+      border-radius: var(--radius); margin-top: 8px;
+    }
+    .import-status.info    { background: rgba(30,122,255,.1); color: var(--accent); }
+    .import-status.success { background: rgba(0,200,150,.1);  color: var(--accent2); }
+    .import-status.error   { background: rgba(248,81,73,.1);  color: var(--danger); }
+
+    /* ─── Modal ─── */
+    #modal {
+      position: fixed; inset: 0; background: rgba(0,0,0,.65);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100; backdrop-filter: blur(4px);
+    }
+
+    .modal-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 14px; padding: 28px 32px; width: 520px; max-width: 95vw;
+      max-height: 90vh; overflow-y: auto;
+      box-shadow: 0 32px 100px rgba(0,0,0,.6);
+    }
+
+    .modal-card h2 {
+      font-family: "Syne", sans-serif; font-size: 18px; font-weight: 700;
+      margin-bottom: 20px;
+    }
+
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .form-group { margin-bottom: 14px; }
+    .form-group.full { grid-column: 1 / -1; }
+    .form-group label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 5px; }
+    .form-group input, .form-group select, .form-group textarea {
+      width: 100%; padding: 9px 12px;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-family: inherit;
+      font-size: 13px; outline: none; transition: border-color .2s;
+    }
+    .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+      border-color: var(--accent);
+    }
+    .form-group select option { background: var(--surface); }
+    .form-group textarea { resize: vertical; min-height: 70px; }
+
+    .modal-footer {
+      display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Auth Screen ──────────────────────────────── -->
+<div id="auth-screen">
+  <div class="auth-card">
+    <div class="auth-logo">URwater CRM</div>
+    <div class="auth-sub">Water retail account management</div>
+    <label for="login-email">Email address</label>
+    <input id="login-email" type="email" placeholder="you@urwater.co.uk" />
+    <label for="login-password">Password</label>
+    <input id="login-password" type="password" placeholder="••••••••"
+           onkeydown="if(event.key==='Enter')login()" />
+    <div id="login-error"></div>
+    <button class="btn btn-primary" style="width:100%" onclick="login()">Sign In →</button>
+  </div>
+</div>
+
+<!-- ── App Screen ────────────────────────────────── -->
+<div id="app-screen" class="hidden">
+
+  <header>
+    <div class="logo">UR<span>water</span> CRM</div>
+    <div class="header-right">
+      <span id="user-email"></span>
+      <button class="btn btn-ghost" onclick="logout()">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- Stats -->
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-label">Total Accounts</div>
+        <div class="stat-value blue" id="stat-total">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Signed</div>
+        <div class="stat-value green" id="stat-signed">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">In Progress</div>
+        <div class="stat-value warn" id="stat-progress">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Prospects</div>
+        <div class="stat-value muted" id="stat-prospect">—</div>
+      </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <input id="search-input" type="text" placeholder="Search name, email, location, SPID…"
+             oninput="filterTable()" />
+      <select id="progress-filter" onchange="filterTable()">
+        <option value="">All stages</option>
+        <option>Prospect</option>
+        <option>In Progress</option>
+        <option>Signed</option>
+        <option>Completed</option>
+        <option>Cancelled</option>
+      </select>
+      <div class="toolbar-spacer"></div>
+      <button class="btn btn-secondary" onclick="triggerImport()">⬆ Import</button>
+      <button class="btn btn-secondary" onclick="exportCSV()">⬇ Export CSV</button>
+      <button class="btn btn-primary" onclick="openAdd()">+ Add Customer</button>
+    </div>
+
+    <!-- Hidden import input -->
+    <input type="file" id="import-file" accept=".csv,.xlsx,.xls"
+           class="hidden" onchange="handleImport(event)" />
+    <div id="import-status"></div>
+
+    <!-- Table -->
+    <div class="table-wrap" style="margin-top:10px">
+      <table>
+        <thead>
+          <tr>
+            <th>Full Name</th>
+            <th>Email</th>
+            <th>Location</th>
+            <th>SPID</th>
+            <th>Contract Progress</th>
+            <th>Contract Length</th>
+            <th>Notes</th>
+            <th>Date Added</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="customer-tbody">
+          <tr><td colspan="9" class="empty-row">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+  </main>
+</div>
+
+<!-- ── Add / Edit Modal ───────────────────────────── -->
+<div id="modal" class="hidden">
+  <div class="modal-card">
+    <h2 id="modal-title">Add Customer</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Full Name *</label>
+        <input id="f-fullName" type="text" placeholder="Dr Jane Smith" />
+      </div>
+      <div class="form-group">
+        <label>Email</label>
+        <input id="f-email" type="email" placeholder="jane@practice.nhs.uk" />
+      </div>
+      <div class="form-group">
+        <label>Location / Address</label>
+        <input id="f-location" type="text" placeholder="Leeds, LS1 4AP" />
+      </div>
+      <div class="form-group">
+        <label>SPID</label>
+        <input id="f-spid" type="text" placeholder="1234567890W" />
+      </div>
+      <div class="form-group">
+        <label>Contract Progress</label>
+        <select id="f-progress">
+          <option>Prospect</option>
+          <option>In Progress</option>
+          <option>Signed</option>
+          <option>Completed</option>
+          <option>Cancelled</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Contract Length</label>
+        <input id="f-length" type="text" placeholder="e.g. 12 months" />
+      </div>
+      <div class="form-group full">
+        <label>Notes</label>
+        <textarea id="f-notes" placeholder="Any additional notes…"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="save-btn" onclick="saveCustomer()">Save</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
