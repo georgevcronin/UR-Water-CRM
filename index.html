@@ -119,7 +119,7 @@
         updatePagination(pageIds.length);
       } catch(e) {
         document.getElementById("customer-tbody").innerHTML =
-          `<tr><td colspan="15" class="empty-row" style="color:var(--danger)">Error: ${esc(e.message)}</td></tr>`;
+          `<tr><td colspan="19" class="empty-row" style="color:var(--danger)">Error: ${esc(e.message)}</td></tr>`;
       }
       setTableLoading(false);
     }
@@ -149,7 +149,7 @@
         document.getElementById("btn-next").disabled = true;
       } catch(e) {
         document.getElementById("customer-tbody").innerHTML =
-          `<tr><td colspan="15" class="empty-row" style="color:var(--danger)">Search failed: ${esc(e.message)}</td></tr>`;
+          `<tr><td colspan="19" class="empty-row" style="color:var(--danger)">Search failed: ${esc(e.message)}</td></tr>`;
       }
       setTableLoading(false);
     }
@@ -195,8 +195,19 @@
       const tbody = document.getElementById("customer-tbody");
       if (on && tbody) {
         tbody.innerHTML =
-          `<tr><td colspan="15" class="empty-row" style="color:var(--accent)">Loading…</td></tr>`;
+          `<tr><td colspan="19" class="empty-row" style="color:var(--accent)">Loading…</td></tr>`;
       }
+    }
+
+    // ── Contract status badge helper ───────────────
+    function contractStatusClass(s) {
+      return {
+        "Prospect":    "badge-prospect",
+        "In Progress": "badge-inprogress",
+        "Signed":      "badge-signed",
+        "Completed":   "badge-completed",
+        "Cancelled":   "badge-cancelled",
+      }[s] || "badge-prospect";
     }
 
     // ── Render ─────────────────────────────────────
@@ -204,7 +215,7 @@
       const tbody = document.getElementById("customer-tbody");
       tbody.innerHTML = "";
       if (!data.length) {
-        tbody.innerHTML = `<tr><td colspan="15" class="empty-row">No records found.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="19" class="empty-row">No records found.</td></tr>`;
         return;
       }
       const sorted = applySortToRows(data);
@@ -226,6 +237,10 @@
           <td title="${esc(c.group)}">${esc(c.group)}</td>
           <td><span class="badge ${sentClass}">${esc(c.sent || "—")}</span></td>
           <td><span class="badge ${replyClass}">${esc(c.reply || "—")}</span></td>
+          <td title="${esc(c.everflowReceipt)}">${esc(c.everflowReceipt)}</td>
+          <td title="${esc(c.commission)}">${esc(c.commission)}</td>
+          <td title="${esc(c.dateOfSigning)}">${esc(c.dateOfSigning)}</td>
+          <td><span class="badge ${contractStatusClass(c.contractStatus)}">${esc(c.contractStatus || "—")}</span></td>
           <td class="action-cell">
             <button class="btn-icon edit-btn" onclick="openEdit('${c.id}')">✎</button>
             <button class="btn-icon del-btn" onclick="deleteCustomer('${c.id}')">✕</button>
@@ -265,6 +280,10 @@
         document.getElementById("f-group").value            = c.group || "";
         document.getElementById("f-sent").value             = c.sent || "";
         document.getElementById("f-reply").value            = c.reply || "No";
+        document.getElementById("f-everflowReceipt").value  = c.everflowReceipt || "";
+        document.getElementById("f-commission").value       = c.commission || "";
+        document.getElementById("f-dateOfSigning").value    = c.dateOfSigning || "";
+        document.getElementById("f-contractStatus").value   = c.contractStatus || "Prospect";
         document.getElementById("modal").classList.remove("hidden");
       });
     };
@@ -290,6 +309,10 @@
         group:            document.getElementById("f-group").value.trim(),
         sent:             document.getElementById("f-sent").value.trim(),
         reply:            document.getElementById("f-reply").value,
+        everflowReceipt:  document.getElementById("f-everflowReceipt").value.trim(),
+        commission:       document.getElementById("f-commission").value.trim(),
+        dateOfSigning:    document.getElementById("f-dateOfSigning").value.trim(),
+        contractStatus:   document.getElementById("f-contractStatus").value,
       };
       if (!data.practiceName) { alert("Practice name is required."); return; }
 
@@ -321,15 +344,17 @@
 
     function clearForm() {
       ["f-area","f-practiceName","f-doctorName","f-organisationCode","f-postCode",
-       "f-addressLine1","f-icb","f-phone","f-practiceManager","f-emailCont","f-spid","f-group","f-sent"]
+       "f-addressLine1","f-icb","f-phone","f-practiceManager","f-emailCont","f-spid","f-group","f-sent",
+       "f-everflowReceipt","f-commission","f-dateOfSigning"]
         .forEach(id => { document.getElementById(id).value = ""; });
-      document.getElementById("f-reply").value = "No";
+      document.getElementById("f-reply").value          = "No";
+      document.getElementById("f-contractStatus").value = "Prospect";
     }
 
     // ── Import ─────────────────────────────────────
     const COLUMN_MAP = {
       area:             ["area"],
-      practiceName:     ["practice name","practicename","practice"],
+      practiceName:     ["practice name","practicename","practice","company name","company","companyname"],
       doctorName:       ["doctor name","doctorname","doctor","dr name"],
       organisationCode: ["organisation code","org code","organisationcode","orgcode","organisation"],
       postCode:         ["post code","postcode","post_code","zip"],
@@ -342,6 +367,10 @@
       group:            ["group"],
       sent:             ["sent"],
       reply:            ["reply","replied"],
+      everflowReceipt:  ["everflow receipt number","everflow receipt","receipt number","everflow"],
+      commission:       ["commission"],
+      dateOfSigning:    ["date of signing","signing date","date signed","signed date"],
+      contractStatus:   ["contract status","contract progress","status"],
     };
 
     window.triggerImport = () => document.getElementById("import-file").click();
@@ -381,6 +410,7 @@
           }
           if (!norm.practiceName && !norm.organisationCode) { skipped++; continue; }
           if (norm.sent) norm.sent = excelDateToString(norm.sent);
+          if (norm.dateOfSigning) norm.dateOfSigning = excelDateToString(norm.dateOfSigning);
           norm.importedAt = new Date().toISOString();
           validRecords.push(norm);
         }
@@ -478,11 +508,12 @@
       try {
         const snap = await getDocs(collection(db, "customers"));
         const all  = snap.docs.map(d => d.data());
-        const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Practice Manager","Email Cont.","SPID","Group","Sent","Reply"];
+        const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Practice Manager","Email Cont.","SPID","Group","Sent","Reply","Everflow Receipt Number","Commission","Date of Signing","Contract Status"];
         const rows = all.map(c => [
           c.area, c.practiceName, c.doctorName, c.organisationCode, c.postCode,
           c.addressLine1, c.icb, c.phone, c.practiceManager, c.emailCont,
-          c.spid, c.group, c.sent, c.reply
+          c.spid, c.group, c.sent, c.reply,
+          c.everflowReceipt, c.commission, c.dateOfSigning, c.contractStatus
         ].map(v => `"${(v||"").replace(/"/g,'""')}"`));
         const csv  = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
         const blob = new Blob([csv], { type: "text/csv" });
@@ -762,11 +793,15 @@
             <th>Group</th>
             <th class="sortable" onclick="setSort('sent')" title="Sort by Sent Date">Sent ⇅</th>
             <th>Reply</th>
+            <th>Everflow Receipt</th>
+            <th>Commission</th>
+            <th>Date of Signing</th>
+            <th>Contract Status</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody id="customer-tbody">
-          <tr><td colspan="15" class="empty-row">Loading…</td></tr>
+          <tr><td colspan="19" class="empty-row">Loading…</td></tr>
         </tbody>
       </table>
     </div>
