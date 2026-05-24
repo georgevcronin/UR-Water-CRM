@@ -415,20 +415,75 @@
           validRecords.push(norm);
         }
 
-        statusEl.textContent = `Writing ${validRecords.length} records…`;
+        // ── Merge by postcode ─────────────────────────
+        // Build a map of postCode → record within the incoming batch first
+        // Then check Firestore for existing records with the same postcode
+        statusEl.textContent = "Checking for postcode matches…";
+        const existingSnap = await getDocs(collection(db, "customers"));
+        const existingByPostcode = {};
+        existingSnap.docs.forEach(d => {
+          const pc = (d.data().postCode || "").trim().toLowerCase();
+          if (pc) existingByPostcode[pc] = { id: d.id, ...d.data() };
+        });
+
+        // Also deduplicate within the incoming batch by postcode
+        const batchByPostcode = {};
+        const toWrite   = []; // new records
+        const toUpdate  = []; // existing records to merge into
+        let merged = 0;
+
+        for (const record of validRecords) {
+          const pc = (record.postCode || "").trim().toLowerCase();
+
+          // Check against existing Firestore records
+          if (pc && existingByPostcode[pc]) {
+            const existing = existingByPostcode[pc];
+            const existingNames = (existing.practiceName || "").split(" / ");
+            if (!existingNames.includes(record.practiceName)) {
+              existingNames.push(record.practiceName);
+              toUpdate.push({ id: existing.id, practiceName: existingNames.join(" / ") });
+              merged++;
+            }
+            // Skip writing as new record
+            continue;
+          }
+
+          // Check within the incoming batch
+          if (pc && batchByPostcode[pc]) {
+            const existingNames = (batchByPostcode[pc].practiceName || "").split(" / ");
+            if (!existingNames.includes(record.practiceName)) {
+              existingNames.push(record.practiceName);
+              batchByPostcode[pc].practiceName = existingNames.join(" / ");
+              merged++;
+            }
+            continue;
+          }
+
+          if (pc) batchByPostcode[pc] = record;
+          toWrite.push(record);
+        }
+
+        statusEl.textContent = `Writing ${toWrite.length} records…`;
         let imported = 0;
         const BATCH_SIZE = 499;
-        for (let i = 0; i < validRecords.length; i += BATCH_SIZE) {
+
+        // Write new records in batches
+        for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
           const batch = writeBatch(db);
-          validRecords.slice(i, i + BATCH_SIZE).forEach(record => {
+          toWrite.slice(i, i + BATCH_SIZE).forEach(record => {
             batch.set(doc(collection(db, "customers")), record);
           });
           await batch.commit();
-          imported += Math.min(BATCH_SIZE, validRecords.length - i);
-          statusEl.textContent = `Writing… ${imported} / ${validRecords.length}`;
+          imported += Math.min(BATCH_SIZE, toWrite.length - i);
+          statusEl.textContent = `Writing… ${imported} / ${toWrite.length}`;
         }
 
-        statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""}${skipped ? ` (${skipped} skipped)` : ""}.`;
+        // Update merged records
+        for (const update of toUpdate) {
+          await updateDoc(doc(db, "customers", update.id), { practiceName: update.practiceName });
+        }
+
+        statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""}${merged ? `, ${merged} merged by postcode` : ""}${skipped ? ` (${skipped} skipped)` : ""}.`;
         statusEl.className = "import-status success";
         allDocIds = []; currentPage = 1;
         loadPage();
