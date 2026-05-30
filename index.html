@@ -35,6 +35,8 @@
     let activeArea     = "";
     let activeSent     = "";
     let editingId      = null;
+    let activeTab      = "all";     // "all", "sent", "unsent"
+    let activeSubTab   = "";        // unsent reason / "blank"
     let sortField      = "practiceName"; // default
     let sortDir        = "asc";          // "asc" or "desc"
 
@@ -47,6 +49,7 @@
         loadPage();
         loadStats();
         loadAreaFilter();
+        buildSubTabs();
       } else {
         document.getElementById("auth-screen").classList.remove("hidden");
         document.getElementById("app-screen").classList.add("hidden");
@@ -100,8 +103,25 @@
 
     async function loadAllIds() {
       const snap = await getDocs(collection(db, "customers"));
-      const all  = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      allDocIds  = applySortToRows(all).map(r => r.id);
+      let all    = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      // Apply tab filter
+      if (activeTab === "sent") {
+        all = all.filter(c => c.sent && c.sent !== "No" && c.sent.trim() !== "");
+      } else if (activeTab === "unsent") {
+        all = all.filter(c => !c.sent || c.sent === "No" || c.sent.trim() === "");
+        // Apply subtab (reason) filter
+        if (activeSubTab === "Blank" || activeSubTab === "") {
+          if (activeSubTab === "Blank") {
+            all = all.filter(c => !c.sent || c.sent.trim() === "" || c.sent === "No");
+          }
+          // "" means all unsent — no further filter
+        } else {
+          all = all.filter(c => (c.sent || "").trim() === activeSubTab);
+        }
+      }
+
+      allDocIds = applySortToRows(all).map(r => r.id);
     }
 
     async function loadPage() {
@@ -152,6 +172,58 @@
           `<tr><td colspan="19" class="empty-row" style="color:var(--danger)">Search failed: ${esc(e.message)}</td></tr>`;
       }
       setTableLoading(false);
+    }
+
+    // ── Tab switching ─────────────────────────────
+    window.switchTab = (tab) => {
+      activeTab    = tab;
+      activeSubTab = "";
+      activeSearch = "";
+      activeArea   = "";
+      activeSent   = "";
+      document.getElementById("search-input").value = "";
+      document.getElementById("area-filter").value  = "";
+      document.getElementById("sent-filter").value  = "";
+      // Update main tab UI
+      document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+      const el = document.getElementById("tab-" + tab);
+      if (el) el.classList.add("active");
+      // Show/hide subtab bar
+      document.getElementById("subtab-bar").style.display = tab === "unsent" ? "flex" : "none";
+      allDocIds = []; currentPage = 1;
+      loadPage();
+    };
+
+    window.switchSubTab = (reason) => {
+      activeSubTab = reason;
+      allDocIds = []; currentPage = 1;
+      // Update subtab UI
+      document.querySelectorAll(".subtab-btn").forEach(b => b.classList.remove("active"));
+      const el = document.getElementById("subtab-" + CSS.escape(reason));
+      if (el) el.classList.add("active");
+      loadPage();
+    };
+
+    // Build subtab buttons from unique unsent reasons
+    async function buildSubTabs() {
+      const snap    = await getDocs(collection(db, "customers"));
+      const all     = snap.docs.map(d => d.data());
+      const unsent  = all.filter(c => !c.sent || c.sent === "No" || c.sent === "");
+      const reasons = [...new Set(unsent.map(c => {
+        const s = (c.sent || "").trim();
+        return s === "" || s === "No" ? "Blank" : s;
+      }))].sort();
+
+      const bar = document.getElementById("subtab-bar");
+      // Keep "All Unsent" button, then add reason buttons
+      bar.innerHTML = `
+        <button class="subtab-btn active" id="subtab-" onclick="switchSubTab('')">All Unsent</button>
+        ${reasons.map(r =>
+          `<button class="subtab-btn" id="subtab-${r}" onclick="switchSubTab('${r.replace(/'/g,"\\'")}')"> ${r}</button>`
+        ).join("")}
+        <div style="flex:1"></div>
+        <button class="btn btn-secondary" style="font-size:11px;padding:5px 12px" onclick="exportCurrentTab()">⬇ Export this tab</button>
+      `;
     }
 
     window.filterTable = () => {
@@ -489,6 +561,8 @@
         loadPage();
         loadStats();
         loadAreaFilter();
+        buildSubTabs();
+        buildSubTabs();
       } catch (err) {
         statusEl.textContent = "Import failed: " + err.message;
         statusEl.className = "import-status error";
@@ -554,6 +628,53 @@
         reader.readAsArrayBuffer(file);
       });
     }
+
+    // ── Export current tab ────────────────────────
+    window.exportCurrentTab = async () => {
+      const statusEl = document.getElementById("import-status");
+      statusEl.textContent = "Preparing export…";
+      statusEl.className = "import-status info";
+      try {
+        const snap = await getDocs(collection(db, "customers"));
+        let all    = snap.docs.map(d => d.data());
+
+        if (activeTab === "sent") {
+          all = all.filter(c => c.sent && c.sent !== "No" && c.sent.trim() !== "");
+        } else if (activeTab === "unsent") {
+          all = all.filter(c => !c.sent || c.sent === "No" || c.sent.trim() === "");
+          if (activeSubTab === "Blank") {
+            all = all.filter(c => !c.sent || c.sent.trim() === "" || c.sent === "No");
+          } else if (activeSubTab) {
+            all = all.filter(c => (c.sent || "").trim() === activeSubTab);
+          }
+        }
+
+        const label = activeTab === "sent" ? "sent"
+                    : activeTab === "unsent" ? ("unsent" + (activeSubTab ? "-" + activeSubTab : ""))
+                    : "all";
+
+        const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Practice Manager","Email Cont.","SPID","Group","Sent","Reply","Everflow Receipt Number","Commission","Date of Signing","Contract Status"];
+        const rows = all.map(c => [
+          c.area, c.practiceName, c.doctorName, c.organisationCode, c.postCode,
+          c.addressLine1, c.icb, c.phone, c.practiceManager, c.emailCont,
+          c.spid, c.group, c.sent, c.reply,
+          c.everflowReceipt, c.commission, c.dateOfSigning, c.contractStatus
+        ].map(v => `"${(v||"").replace(/"/g,'""')}"`));
+
+        const csv  = [headers.join(","), ...rows.map(r => r.join(","))].join("
+");
+        const blob = new Blob([csv], { type: "text/csv" });
+        const a    = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `urwater-crm-${label}-${new Date().toISOString().slice(0,10)}.csv`;
+        a.click();
+        statusEl.textContent = `✓ Exported ${all.length} records.`;
+        statusEl.className = "import-status success";
+      } catch(e) {
+        statusEl.textContent = "Export failed: " + e.message;
+        statusEl.className = "import-status error";
+      }
+    };
 
     // ── Export ─────────────────────────────────────
     window.exportCSV = async () => {
@@ -757,6 +878,37 @@
     .form-group input, .form-group select { width: 100%; padding: 9px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: inherit; font-size: 13px; outline: none; transition: border-color .2s; }
     .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
     .form-group select option { background: var(--surface); }
+    /* Tabs */
+    .tab-bar {
+      display: flex; align-items: center; gap: 4px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px; padding-bottom: 0;
+    }
+    .tab-btn {
+      background: transparent; border: none; border-bottom: 2px solid transparent;
+      color: var(--muted); font-family: inherit; font-size: 12px; font-weight: 600;
+      padding: 10px 18px; cursor: pointer; margin-bottom: -1px;
+      transition: color .15s, border-color .15s;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* Subtabs */
+    .subtab-bar {
+      display: flex; align-items: center; gap: 6px;
+      flex-wrap: wrap; margin-bottom: 14px;
+      padding: 10px 14px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .subtab-btn {
+      background: var(--border); border: none; border-radius: 100px;
+      color: var(--muted); font-family: inherit; font-size: 11px; font-weight: 600;
+      padding: 4px 12px; cursor: pointer; transition: background .15s, color .15s;
+    }
+    .subtab-btn:hover { background: rgba(30,122,255,.15); color: var(--accent); }
+    .subtab-btn.active { background: var(--accent); color: #fff; }
+
     th.sortable { cursor: pointer; user-select: none; }
     th.sortable:hover { color: var(--accent); }
 
@@ -802,14 +954,23 @@
       <div class="stat-card"><div class="stat-label">Areas Covered</div><div class="stat-value muted" id="stat-areas">—</div></div>
     </div>
 
+    <!-- Main tabs -->
+    <div class="tab-bar">
+      <button class="tab-btn active" id="tab-all"    onclick="switchTab('all')">All Practices</button>
+      <button class="tab-btn"        id="tab-sent"   onclick="switchTab('sent')">✉ Sent</button>
+      <button class="tab-btn"        id="tab-unsent" onclick="switchTab('unsent')">✗ Unsent</button>
+      <div style="flex:1"></div>
+      <button class="btn btn-secondary" style="font-size:11px;padding:5px 12px" onclick="exportCurrentTab()">⬇ Export this tab</button>
+    </div>
+
+    <!-- Unsent subtabs (shown only when Unsent tab active) -->
+    <div class="subtab-bar" id="subtab-bar" style="display:none">
+      <button class="subtab-btn active" id="subtab-" onclick="switchSubTab('')">All Unsent</button>
+    </div>
+
     <div class="toolbar">
       <input id="search-input" type="text" placeholder="Search practice, doctor, postcode, SPID, org code…" oninput="filterTable()" />
       <select id="area-filter" onchange="filterTable()"><option value="">All areas</option></select>
-      <select id="sent-filter" onchange="filterTable()">
-        <option value="">Sent: All</option>
-        <option value="yes">Sent</option>
-        <option value="no">Not sent</option>
-      </select>
       <select id="sort-select" onchange="handleSortSelect(this.value)" title="Sort by">
         <option value="practiceName_asc">Practice Name A→Z</option>
         <option value="practiceName_desc">Practice Name Z→A</option>
@@ -820,7 +981,6 @@
       </select>
       <div class="toolbar-spacer"></div>
       <button class="btn btn-secondary" onclick="triggerImport()">⬆ Import</button>
-      <button class="btn btn-secondary" onclick="exportCSV()">⬇ Export CSV</button>
       <button class="btn btn-primary" onclick="openAdd()">+ Add Practice</button>
     </div>
 
