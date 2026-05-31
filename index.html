@@ -11,7 +11,7 @@
       getFirestore, collection, addDoc, getDocs, getDoc, doc, updateDoc, deleteDoc, writeBatch, query
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
     import {
-      getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
+      getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, setPersistence, browserSessionPersistence
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
     const firebaseConfig = {
@@ -27,7 +27,7 @@
     const db   = getFirestore(app);
     const auth = getAuth(app);
 
-    // ── Pagination state ───────────────────────────
+    // -- Pagination state ---------------------------
     const PAGE_SIZE = 50;
     let currentPage    = 1;
     let totalEstimate  = 0;
@@ -40,7 +40,7 @@
     let sortField      = "practiceName"; // default
     let sortDir        = "asc";          // "asc" or "desc"
 
-    // ── Auth ───────────────────────────────────────
+    // -- Auth ---------------------------------------
     onAuthStateChanged(auth, user => {
       if (user) {
         document.getElementById("auth-screen").classList.add("hidden");
@@ -62,15 +62,21 @@
       const errEl    = document.getElementById("login-error");
       errEl.textContent = "";
       try {
+        // Use session persistence to avoid tracking prevention storage blocks
+        await setPersistence(auth, browserSessionPersistence);
         await signInWithEmailAndPassword(auth, email, password);
       } catch (e) {
-        errEl.textContent = "Invalid credentials. Please try again.";
+        if (e.code === "auth/network-request-failed") {
+          errEl.textContent = "Network error — check your connection or disable tracking prevention for this site.";
+        } else {
+          errEl.textContent = "Invalid credentials. Please try again.";
+        }
       }
     };
 
     window.logout = () => signOut(auth);
 
-    // ── Stats (runs once, counts all docs) ────────
+    // -- Stats (runs once, counts all docs) --------
     async function loadStats() {
       try {
         const snap = await getDocs(collection(db, "customers"));
@@ -84,7 +90,7 @@
       } catch(e) { console.error("Stats error:", e); }
     }
 
-    // ── Area filter population ─────────────────────
+    // -- Area filter population ---------------------
     async function loadAreaFilter() {
       try {
         const snap  = await getDocs(collection(db, "customers"));
@@ -97,7 +103,7 @@
 
     window.populateAreaFilter = loadAreaFilter;
 
-    // ── Paginated load ─────────────────────────────
+    // -- Paginated load -----------------------------
     // When searching/filtering we load all matches client-side (searches are rare, browsing is common)
     let allDocIds = []; // flat list of all doc IDs in sort order for pagination
 
@@ -115,7 +121,7 @@
           if (activeSubTab === "Blank") {
             all = all.filter(c => !c.sent || c.sent.trim() === "" || c.sent === "No");
           }
-          // "" means all unsent — no further filter
+          // "" means all unsent - no further filter
         } else {
           all = all.filter(c => (c.sent || "").trim() === activeSubTab);
         }
@@ -144,7 +150,7 @@
       setTableLoading(false);
     }
 
-    // ── Search — loads all matching docs client-side ──
+    // -- Search - loads all matching docs client-side --
     async function loadFiltered() {
       setTableLoading(true);
       try {
@@ -174,7 +180,7 @@
       setTableLoading(false);
     }
 
-    // ── Tab switching ─────────────────────────────
+    // -- Tab switching -----------------------------
     window.switchTab = (tab) => {
       activeTab    = tab;
       activeSubTab = "";
@@ -222,7 +228,7 @@
           `<button class="subtab-btn" id="subtab-${r}" onclick="switchSubTab('${r.replace(/'/g,"\\'")}')"> ${r}</button>`
         ).join("")}
         <div style="flex:1"></div>
-        <button class="btn btn-secondary" style="font-size:11px;padding:5px 12px" onclick="exportCurrentTab()">⬇ Export this tab</button>
+        <button class="btn btn-secondary" style="font-size:11px;padding:5px 12px" onclick="exportCurrentTab()">- Export this tab</button>
       `;
     }
 
@@ -239,7 +245,7 @@
       }
     };
 
-    // ── Pagination controls ────────────────────────
+    // -- Pagination controls ------------------------
     window.nextPage = () => {
       const maxPage = Math.ceil(allDocIds.length / PAGE_SIZE);
       if (currentPage >= maxPage) return;
@@ -267,11 +273,11 @@
       const tbody = document.getElementById("customer-tbody");
       if (on && tbody) {
         tbody.innerHTML =
-          `<tr><td colspan="19" class="empty-row" style="color:var(--accent)">Loading…</td></tr>`;
+          `<tr><td colspan="19" class="empty-row" style="color:var(--accent)">Loading-</td></tr>`;
       }
     }
 
-    // ── Contract status badge helper ───────────────
+    // -- Contract status badge helper ---------------
     function contractStatusClass(s) {
       return {
         "Prospect":    "badge-prospect",
@@ -282,7 +288,7 @@
       }[s] || "badge-prospect";
     }
 
-    // ── Render ─────────────────────────────────────
+    // -- Render -------------------------------------
     function renderTable(data) {
       const tbody = document.getElementById("customer-tbody");
       tbody.innerHTML = "";
@@ -307,23 +313,23 @@
           <td title="${esc(c.emailCont)}">${esc(c.emailCont)}</td>
           <td title="${esc(c.spid)}">${esc(c.spid)}</td>
           <td title="${esc(c.group)}">${esc(c.group)}</td>
-          <td><span class="badge ${sentClass}">${esc(c.sent || "—")}</span></td>
-          <td><span class="badge ${replyClass}">${esc(c.reply || "—")}</span></td>
+          <td><span class="badge ${sentClass}">${esc(c.sent || "-")}</span></td>
+          <td><span class="badge ${replyClass}">${esc(c.reply || "-")}</span></td>
           <td title="${esc(c.everflowReceipt)}">${esc(c.everflowReceipt)}</td>
           <td title="${esc(c.commission)}">${esc(c.commission)}</td>
           <td title="${esc(c.dateOfSigning)}">${esc(c.dateOfSigning)}</td>
-          <td><span class="badge ${contractStatusClass(c.contractStatus)}">${esc(c.contractStatus || "—")}</span></td>
+          <td><span class="badge ${contractStatusClass(c.contractStatus)}">${esc(c.contractStatus || "-")}</span></td>
           <td class="action-cell">
-            <button class="btn-icon edit-btn" onclick="openEdit('${c.id}')">✎</button>
-            <button class="btn-icon del-btn" onclick="deleteCustomer('${c.id}')">✕</button>
+            <button class="btn-icon edit-btn" onclick="openEdit('${c.id}')">-</button>
+            <button class="btn-icon del-btn" onclick="deleteCustomer('${c.id}')">-</button>
           </td>
         </tr>`;
       });
-      // Build all HTML at once — much faster than innerHTML +=
+      // Build all HTML at once - much faster than innerHTML +=
       tbody.innerHTML = rows.join("");
     }
 
-    // ── Add / Edit ─────────────────────────────────
+    // -- Add / Edit ---------------------------------
     window.openAdd = () => {
       editingId = null;
       document.getElementById("modal-title").textContent = "Add Practice";
@@ -389,7 +395,7 @@
       if (!data.practiceName) { alert("Practice name is required."); return; }
 
       const saveBtn = document.getElementById("save-btn");
-      saveBtn.disabled = true; saveBtn.textContent = "Saving…";
+      saveBtn.disabled = true; saveBtn.textContent = "Saving-";
       try {
         if (editingId) {
           await updateDoc(doc(db, "customers", editingId), data);
@@ -423,7 +429,7 @@
       document.getElementById("f-contractStatus").value = "Prospect";
     }
 
-    // ── Import ─────────────────────────────────────
+    // -- Import -------------------------------------
     const COLUMN_MAP = {
       area:             ["area"],
       practiceName:     ["practice name","practicename","practice","company name","company","companyname"],
@@ -445,7 +451,7 @@
       contractStatus:   ["contract status","contract progress","status"],
     };
 
-    // ── Fuzzy string similarity (Dice coefficient) ─
+    // -- Fuzzy string similarity (Dice coefficient) -
     // Returns 0.0 (no match) to 1.0 (identical)
     function stringSimilarity(a, b) {
       a = a.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -485,7 +491,7 @@
         alert("Please upload a .csv, .xlsx, .xls, or .ods file."); return;
       }
       const statusEl = document.getElementById("import-status");
-      statusEl.textContent = "Reading file…";
+      statusEl.textContent = "Reading file-";
       statusEl.className = "import-status info";
 
       try {
@@ -502,7 +508,7 @@
           colIdx[field] = aliases.find(a => headers.includes(a)) ?? null;
         }
 
-        statusEl.textContent = `Detected format: ${format === "everflow" ? "Everflow sheet" : format === "george" ? "George sheet" : "Mixed/combined sheet"} — processing…`;
+        statusEl.textContent = `Detected format: ${format === "everflow" ? "Everflow sheet" : format === "george" ? "George sheet" : "Mixed/combined sheet"} - processing-`;
 
         let skipped = 0;
         const validRecords = [];
@@ -524,7 +530,7 @@
             norm.doctorName  = norm.doctorName || "";
             // contractStatus already mapped from "Contract Status" column
           } else if (format === "george") {
-            // George records won't have everflow fields — leave blank
+            // George records won't have everflow fields - leave blank
             norm.everflowReceipt = norm.everflowReceipt || "";
             norm.commission      = norm.commission || "";
             norm.dateOfSigning   = norm.dateOfSigning || "";
@@ -540,10 +546,10 @@
           validRecords.push(norm);
         }
 
-        // ── Merge by postcode ─────────────────────────
-        // Build a map of postCode → record within the incoming batch first
+        // -- Merge by postcode -------------------------
+        // Build a map of postCode - record within the incoming batch first
         // Then check Firestore for existing records with the same postcode
-        statusEl.textContent = "Checking for postcode matches…";
+        statusEl.textContent = "Checking for postcode matches-";
         const existingSnap = await getDocs(collection(db, "customers"));
         const existingByPostcode = {};
         existingSnap.docs.forEach(d => {
@@ -588,7 +594,7 @@
           toWrite.push(record);
         }
 
-        statusEl.textContent = `Writing ${toWrite.length} records…`;
+        statusEl.textContent = `Writing ${toWrite.length} records-`;
         let imported = 0;
         const BATCH_SIZE = 499;
 
@@ -600,7 +606,7 @@
           });
           await batch.commit();
           imported += Math.min(BATCH_SIZE, toWrite.length - i);
-          statusEl.textContent = `Writing… ${imported} / ${toWrite.length}`;
+          statusEl.textContent = `Writing- ${imported} / ${toWrite.length}`;
         }
 
         // Update merged records
@@ -608,7 +614,7 @@
           await updateDoc(doc(db, "customers", update.id), { practiceName: update.practiceName });
         }
 
-        statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""} from ${format} sheet${merged ? `, ${merged} merged by postcode` : ""}${skipped ? ` (${skipped} skipped)` : ""}.`;
+        statusEl.textContent = `- Imported ${imported} record${imported !== 1 ? "s" : ""} from ${format} sheet${merged ? `, ${merged} merged by postcode` : ""}${skipped ? ` (${skipped} skipped)` : ""}.`;
         statusEl.className = "import-status success";
         allDocIds = []; currentPage = 1;
         loadPage();
@@ -623,7 +629,7 @@
       e.target.value = "";
     };
 
-    // ── Excel date conversion ──────────────────────
+    // -- Excel date conversion ----------------------
     function excelDateToString(val) {
       if (!val && val !== 0) return "";
       if (typeof val === "string" && isNaN(val.trim())) return val.trim();
@@ -634,7 +640,7 @@
       return date.toLocaleDateString("en-GB");
     }
 
-    // ── CSV Parser ─────────────────────────────────
+    // -- CSV Parser ---------------------------------
     function parseCSV(file) {
       return new Promise((res, rej) => {
         const reader = new FileReader();
@@ -665,10 +671,10 @@
       return result;
     }
 
-    // ── XLSX/ODS Parser ────────────────────────────
+    // -- XLSX/ODS Parser ----------------------------
     function parseXLSX(file) {
       return new Promise((res, rej) => {
-        if (!window.XLSX) { rej(new Error("XLSX library not loaded yet — try again in a moment.")); return; }
+        if (!window.XLSX) { rej(new Error("XLSX library not loaded yet - try again in a moment.")); return; }
         const reader = new FileReader();
         reader.onload = e => {
           try {
@@ -682,10 +688,10 @@
       });
     }
 
-    // ── Export current tab ────────────────────────
+    // -- Export current tab ------------------------
     window.exportCurrentTab = async () => {
       const statusEl = document.getElementById("import-status");
-      statusEl.textContent = "Preparing export…";
+      statusEl.textContent = "Preparing export-";
       statusEl.className = "import-status info";
       try {
         const snap = await getDocs(collection(db, "customers"));
@@ -721,7 +727,7 @@
         a.href = URL.createObjectURL(blob);
         a.download = `urwater-crm-${label}-${new Date().toISOString().slice(0,10)}.csv`;
         a.click();
-        statusEl.textContent = `✓ Exported ${all.length} records.`;
+        statusEl.textContent = `- Exported ${all.length} records.`;
         statusEl.className = "import-status success";
       } catch(e) {
         statusEl.textContent = "Export failed: " + e.message;
@@ -729,10 +735,10 @@
       }
     };
 
-    // ── Export ─────────────────────────────────────
+    // -- Export -------------------------------------
     window.exportCSV = async () => {
       const statusEl = document.getElementById("import-status");
-      statusEl.textContent = "Preparing export…";
+      statusEl.textContent = "Preparing export-";
       statusEl.className = "import-status info";
       try {
         const snap = await getDocs(collection(db, "customers"));
@@ -750,7 +756,7 @@
         a.href = URL.createObjectURL(blob);
         a.download = `urwater-crm-${new Date().toISOString().slice(0,10)}.csv`;
         a.click();
-        statusEl.textContent = `✓ Exported ${all.length} records.`;
+        statusEl.textContent = `- Exported ${all.length} records.`;
         statusEl.className = "import-status success";
       } catch(e) {
         statusEl.textContent = "Export failed: " + e.message;
@@ -762,7 +768,7 @@
       return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
     }
 
-    // ── Sort ──────────────────────────────────────
+    // -- Sort --------------------------------------
     function applySortToRows(rows) {
       return rows.slice().sort((a, b) => {
         let av = (a[sortField] || "").toString();
@@ -771,7 +777,7 @@
         // For sent date, parse DD/MM/YYYY into a comparable value
         if (sortField === "sent") {
           const parseDate = s => {
-            if (!s || s === "No" || s === "—") return 0;
+            if (!s || s === "No" || s === "-") return 0;
             const parts = s.split("/");
             if (parts.length === 3) return new Date(parts[2], parts[1]-1, parts[0]).getTime();
             return 0;
