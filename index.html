@@ -445,6 +445,36 @@
       contractStatus:   ["contract status","contract progress","status"],
     };
 
+    // ── Fuzzy string similarity (Dice coefficient) ─
+    // Returns 0.0 (no match) to 1.0 (identical)
+    function stringSimilarity(a, b) {
+      a = a.toLowerCase().replace(/[^a-z0-9]/g, "");
+      b = b.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (a === b) return 1.0;
+      if (a.length < 2 || b.length < 2) return 0.0;
+      const bigrams = s => {
+        const set = new Map();
+        for (let i = 0; i < s.length - 1; i++) {
+          const bg = s.slice(i, i + 2);
+          set.set(bg, (set.get(bg) || 0) + 1);
+        }
+        return set;
+      };
+      const aB = bigrams(a), bB = bigrams(b);
+      let intersection = 0;
+      for (const [bg, cnt] of aB) {
+        if (bB.has(bg)) intersection += Math.min(cnt, bB.get(bg));
+      }
+      return (2 * intersection) / (a.length - 1 + b.length - 1);
+    }
+
+    // Check if a name is already represented in an existing combined name
+    // Returns true if any component is >60% similar
+    function nameAlreadyPresent(existingCombined, newName) {
+      const parts = existingCombined.split(" / ");
+      return parts.some(p => stringSimilarity(p, newName) > 0.6);
+    }
+
     window.triggerImport = () => document.getElementById("import-file").click();
 
     window.handleImport = async (e) => {
@@ -462,11 +492,17 @@
         const rows = ext === "csv" ? await parseCSV(file) : await parseXLSX(file);
         if (!rows.length) { statusEl.textContent = "No data rows found."; return; }
 
-        const headers = Object.keys(rows[0]).map(h => h.trim().toLowerCase());
-        const colIdx  = {};
+        const rawHeaders = Object.keys(rows[0]);
+        const headers    = rawHeaders.map(h => h.trim().toLowerCase());
+        const format     = detectFormat(headers);
+
+        // Build column index from COLUMN_MAP
+        const colIdx = {};
         for (const [field, aliases] of Object.entries(COLUMN_MAP)) {
           colIdx[field] = aliases.find(a => headers.includes(a)) ?? null;
         }
+
+        statusEl.textContent = `Detected format: ${format === "everflow" ? "Everflow sheet" : format === "george" ? "George sheet" : "Mixed/combined sheet"} — processing…`;
 
         let skipped = 0;
         const validRecords = [];
@@ -474,16 +510,33 @@
           const norm = {};
           for (const [field, alias] of Object.entries(colIdx)) {
             if (alias) {
-              const rawKey = Object.keys(row).find(k => k.trim().toLowerCase() === alias);
+              const rawKey = rawHeaders.find(k => k.trim().toLowerCase() === alias);
               norm[field] = rawKey ? (row[rawKey]||"").toString().trim() : "";
             } else {
               norm[field] = "";
             }
           }
+
+          // Format-specific defaults
+          if (format === "everflow") {
+            // Everflow records default sent/reply to blank, area to blank
+            norm.area        = norm.area || "";
+            norm.doctorName  = norm.doctorName || "";
+            // contractStatus already mapped from "Contract Status" column
+          } else if (format === "george") {
+            // George records won't have everflow fields — leave blank
+            norm.everflowReceipt = norm.everflowReceipt || "";
+            norm.commission      = norm.commission || "";
+            norm.dateOfSigning   = norm.dateOfSigning || "";
+            norm.contractStatus  = norm.contractStatus || "";
+          }
+
           if (!norm.practiceName && !norm.organisationCode) { skipped++; continue; }
-          if (norm.sent) norm.sent = excelDateToString(norm.sent);
+          if (norm.sent) norm.sent                   = excelDateToString(norm.sent);
+          if (norm.reply) norm.reply                 = excelDateToString(norm.reply);
           if (norm.dateOfSigning) norm.dateOfSigning = excelDateToString(norm.dateOfSigning);
-          norm.importedAt = new Date().toISOString();
+          norm.sourceFormat = format;
+          norm.importedAt   = new Date().toISOString();
           validRecords.push(norm);
         }
 
@@ -555,7 +608,7 @@
           await updateDoc(doc(db, "customers", update.id), { practiceName: update.practiceName });
         }
 
-        statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""}${merged ? `, ${merged} merged by postcode` : ""}${skipped ? ` (${skipped} skipped)` : ""}.`;
+        statusEl.textContent = `✓ Imported ${imported} record${imported !== 1 ? "s" : ""} from ${format} sheet${merged ? `, ${merged} merged by postcode` : ""}${skipped ? ` (${skipped} skipped)` : ""}.`;
         statusEl.className = "import-status success";
         allDocIds = []; currentPage = 1;
         loadPage();
@@ -653,7 +706,7 @@
                     : activeTab === "unsent" ? ("unsent" + (activeSubTab ? "-" + activeSubTab : ""))
                     : "all";
 
-        const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Practice Manager","Email Cont.","SPID","Group","Sent","Reply","Everflow Receipt Number","Commission","Date of Signing","Contract Status"];
+        const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Manager","Email Cont.","SPID","Group","Sent","Reply","Everflow Receipt Number","Commission","Date of Signing","Contract Status"];
         const rows = all.map(c => [
           c.area, c.practiceName, c.doctorName, c.organisationCode, c.postCode,
           c.addressLine1, c.icb, c.phone, c.practiceManager, c.emailCont,
@@ -684,7 +737,7 @@
       try {
         const snap = await getDocs(collection(db, "customers"));
         const all  = snap.docs.map(d => d.data());
-        const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Practice Manager","Email Cont.","SPID","Group","Sent","Reply","Everflow Receipt Number","Commission","Date of Signing","Contract Status"];
+        const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Manager","Email Cont.","SPID","Group","Sent","Reply","Everflow Receipt Number","Commission","Date of Signing","Contract Status"];
         const rows = all.map(c => [
           c.area, c.practiceName, c.doctorName, c.organisationCode, c.postCode,
           c.addressLine1, c.icb, c.phone, c.practiceManager, c.emailCont,
@@ -1002,7 +1055,7 @@
             <th>Address</th>
             <th>ICB</th>
             <th>Phone</th>
-            <th>Practice Manager</th>
+            <th>Manager</th>
             <th>Email</th>
             <th>SPID</th>
             <th>Group</th>
@@ -1061,8 +1114,8 @@
         <input id="f-phone" type="text" placeholder="01134 000000" />
       </div>
       <div class="form-group">
-        <label>Practice Manager</label>
-        <input id="f-practiceManager" type="text" placeholder="John Doe" />
+        <label>Manager</label>
+        <input id="f-practiceManager" type="text" placeholder="e.g. John Doe" />
       </div>
       <div class="form-group">
         <label>Email Contact</label>
