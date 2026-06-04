@@ -203,7 +203,8 @@
       activeSent   = "";
       document.getElementById("search-input").value = "";
       document.getElementById("area-filter").value  = "";
-      document.getElementById("sent-filter").value  = "";
+      const sentFilter = document.getElementById("sent-filter");
+      if (sentFilter) sentFilter.value = "";
       // Update main tab UI
       document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
       const el = document.getElementById("tab-" + tab);
@@ -249,7 +250,7 @@
     window.filterTable = () => {
       activeSearch = document.getElementById("search-input").value.trim();
       activeArea   = document.getElementById("area-filter").value;
-      activeSent   = document.getElementById("sent-filter").value;
+      const sf = document.getElementById("sent-filter"); activeSent = sf ? sf.value : "";
 
       if (activeSearch || activeArea || activeSent) {
         loadFiltered();
