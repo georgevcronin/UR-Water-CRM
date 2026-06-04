@@ -820,6 +820,1589 @@
 
     window.triggerImport = () => document.getElementById("import-file").click();
 
+    // -- Format detection --
+    function detectFormat(headers) {
+      const h = headers.map(x => x.toLowerCase());
+      const hasEverflow    = h.some(x => x.includes("everflow") || x.includes("commission") || x.includes("date of signing"));
+      const hasGeorge      = h.some(x => x.includes("area") || x.includes("doctor") || x.includes("organisation code") || x.includes("icb"));
+      const hasSourceSheet = h.some(x => x.includes("_source_sheet"));
+      const isEmlOutput    = hasSourceSheet || (hasGeorge && h.includes("sent") && h.includes("reply"));
+      if (isEmlOutput)              return "eml_output";
+      if (hasEverflow && !hasGeorge) return "everflow";
+      if (hasGeorge && !hasEverflow) return "george";
+      return "mixed";
+    }
+
+    window.handleImport = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const ext = file.name.split(".").pop().toLowerCase();
+      if (!["csv","xlsx","xls","ods"].includes(ext)) {
+        alert("Please upload a .csv, .xlsx, .xls, or .ods file."); return;
+      }
+      const statusEl = document.getElementById("import-status");
+      statusEl.textContent = "Reading file-";
+      statusEl.className = "import-status info";
+
+      try {
+        const rows = ext === "csv" ? await parseCSV(file) : await parseXLSX(file);
+        if (!rows.length) { statusEl.textContent = "No data rows found."; return; }
+
+        const rawHeaders = Object.keys(rows[0]);
+        const headers    = rawHeaders.map(h => h.trim().toLowerCase());
+        const format     = detectFormat(headers);
+
+        // Build column index from COLUMN_MAP
+        const colIdx = {};
+        for (const [field, aliases] of Object.entries(COLUMN_MAP)) {
+          colIdx[field] = aliases.find(a => headers.includes(a)) ?? null;
+        }
+
+        statusEl.textContent = `Detected format: ${
+          format === "everflow" ? "Everflow sheet" :
+          format === "george"   ? "George sheet" :
+          format === "eml_output" ? "EML output spreadsheet - updating Sent/Reply only" :
+          "Mixed/combined sheet"} - processing...`;
+
+        // -- EML output: update Sent/Reply on existing records only --
+        if (format === "eml_output") {
+          let updated = 0, skippedEml = 0;
+          const existingSnap = await getDocs(collection(db, "customers"));
+          const existingAll  = existingSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+          for (const row of rows) {
+            const rowSent    = excelDateToString((row["Sent"]   || row["sent"]   || "").toString().trim());
+            const rowReply   = excelDateToString((row["Reply"]  || row["reply"]  || "").toString().trim());
+            if (!rowSent && !rowReply) { skippedEml++; continue; }
+
+            const rowOrg     = (row["Organisation Code"] || row["organisation code"] || "").toString().trim().toUpperCase();
+            const rowEmail   = (row["Email Cont."] || row["email cont."] || row["Email"] || "").toString().trim().toLowerCase();
+            const rowName    = (row["Practice Name"] || row["practice name"] || row["Company Name"] || "").toString().trim();
+            const rowPostCode= (row["Post Code"] || row["post code"] || row["postcode"] || "").toString().trim().toLowerCase();
+
+            let match = null;
+            if (rowOrg)      match = existingAll.find(r => (r.organisationCode||"").trim().toUpperCase() === rowOrg);
+            if (!match && rowEmail)    match = existingAll.find(r => (r.emailCont||"").trim().toLowerCase() === rowEmail);
+            if (!match && rowPostCode) match = existingAll.find(r => (r.postCode||"").trim().toLowerCase() === rowPostCode);
+            if (!match && rowName) {
+              let best = null, bestScore = 0;
+              for (const r of existingAll) {
+                const score = wordSimilarity(rowName, r.practiceName||"");
+                if (score > bestScore) { bestScore = score; best = r; }
+              }
+              if (bestScore >= 0.65) match = best;
+            }
+
+            if (!match) { skippedEml++; continue; }
+
+            const updates = {};
+            if (rowSent && (!match.sent || match.sent === "No")) updates.sent = rowSent;
+            if (rowReply) {
+              const cur = match.reply || "";
+              if (!cur || cur === "No" || cur.startsWith("Auto-reply") || cur.startsWith("Read")) {
+                updates.reply = rowReply;
+              }
+            }
+            if (Object.keys(updates).length) {
+              await updateDoc(doc(db, "customers", match.id), updates);
+              updated++;
+            } else { skippedEml++; }
+          }
+
+          statusEl.textContent = `Done: ${updated} records updated${skippedEml ? ` (${skippedEml} skipped)` : ""}.`;
+          statusEl.className = "import-status success";
+          allDocIds = []; currentPage = 1;
+          loadPage(); loadStats(); loadAreaFilter(); buildSubTabs();
+          e.target.value = "";
+          return;
+        }
+
+        let skipped = 0;
+        const validRecords = [];
+        for (const row of rows) {
+          const norm = {};
+          for (const [field, alias] of Object.entries(colIdx)) {
+            if (alias) {
+              const rawKey = rawHeaders.find(k => k.trim().toLowerCase() === alias);
+              norm[field] = rawKey ? (row[rawKey]||"").toString().trim() : "";
+            } else {
+              norm[field] = "";
+            }
+          }
+
+          // Format-specific defaults
+          if (format === "everflow") {
+            // Everflow records default sent/reply to blank, area to blank
+            norm.area        = norm.area || "";
+            norm.doctorName  = norm.doctorName || "";
+            // contractStatus already mapped from "Contract Status" column
+          } else if (format === "george") {
+            // George records won't have everflow fields - leave blank
+            norm.everflowReceipt = norm.everflowReceipt || "";
+            norm.commission      = norm.commission || "";
+            norm.dateOfSigning   = norm.dateOfSigning || "";
+            norm.contractStatus  = norm.contractStatus || "";
+          }
+
+          if (!norm.practiceName && !norm.organisationCode) { skipped++; continue; }
+          if (norm.sent) norm.sent                   = excelDateToString(norm.sent);
+          if (norm.reply) norm.reply                 = excelDateToString(norm.reply);
+          if (norm.dateOfSigning) norm.dateOfSigning = excelDateToString(norm.dateOfSigning);
+          norm.sourceFormat = format;
+          norm.importedAt   = new Date().toISOString();
+          validRecords.push(norm);
+        }
+
+        // -- Merge by postcode -------------------------
+        // Build a map of postCode - record within the incoming batch first
+        // Then check Firestore for existing records with the same postcode
+        statusEl.textContent = "Checking for postcode matches-";
+        const existingSnap = await getDocs(collection(db, "customers"));
+        const existingByPostcode = {};
+        existingSnap.docs.forEach(d => {
+          const pc = (d.data().postCode || "").trim().toLowerCase();
+          if (pc) existingByPostcode[pc] = { id: d.id, ...d.data() };
+        });
+
+        // Also deduplicate within the incoming batch by postcode
+        const batchByPostcode = {};
+        const toWrite   = []; // new records
+        const toUpdate  = []; // existing records to merge into
+        let merged = 0;
+
+        for (const record of validRecords) {
+          const pc = (record.postCode || "").trim().toLowerCase();
+
+          // Check against existing Firestore records
+          if (pc && existingByPostcode[pc]) {
+            const existing = existingByPostcode[pc];
+            const existingNames = (existing.practiceName || "").split(" / ");
+            if (!existingNames.includes(record.practiceName)) {
+              existingNames.push(record.practiceName);
+              toUpdate.push({ id: existing.id, practiceName: existingNames.join(" / ") });
+              merged++;
+            }
+            // Skip writing as new record
+            continue;
+          }
+
+          // Check within the incoming batch
+          if (pc && batchByPostcode[pc]) {
+            const existingNames = (batchByPostcode[pc].practiceName || "").split(" / ");
+            if (!existingNames.includes(record.practiceName)) {
+              existingNames.push(record.practiceName);
+              batchByPostcode[pc].practiceName = existingNames.join(" / ");
+              merged++;
+            }
+            continue;
+          }
+
+          if (pc) batchByPostcode[pc] = record;
+          toWrite.push(record);
+        }
+
+        statusEl.textContent = `Writing ${toWrite.length} records-`;
+        let imported = 0;
+        const BATCH_SIZE = 499;
+
+        // Write new records in batches
+        for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
+          const batch = writeBatch(db);
+          toWrite.slice(i, i + BATCH_SIZE).forEach(record => {
+            batch.set(doc(collection(db, "customers")), record);
+          });
+          await batch.commit();
+          imported += Math.min(BATCH_SIZE, toWrite.length - i);
+          statusEl.textContent = `Writing- ${imported} / ${toWrite.length}`;
+        }
+
+        // Update merged records
+        for (const update of toUpdate) {
+          await updateDoc(doc(db, "customers", update.id), { practiceName: update.practiceName });
+        }
+
+        statusEl.textContent = `- Imported ${imported} record${imported !== 1 ? "s" : ""} from ${format} sheet${merged ? `, ${merged} merged by postcode` : ""}${skipped ? ` (${skipped} skipped)` : ""}.`;
+        statusEl.className = "import-status success";
+        allDocIds = []; currentPage = 1;
+        loadPage();
+        loadStats();
+        loadAreaFilter();
+        buildSubTabs();
+        buildSubTabs();
+      } catch (err) {
+        statusEl.textContent = "Import failed: " + err.message;
+        statusEl.className = "import-status error";
+      }
+      e.target.value = "";
+    };
+
+    // -- Excel date conversion ----------------------
+    function excelDateToString(val) {
+      if (!val && val !== 0) return "";
+      if (typeof val === "string" && isNaN(val.trim())) return val.trim();
+      const num = typeof val === "string" ? parseFloat(val.trim()) : val;
+      if (isNaN(num)) return val.toString().trim();
+      const date = new Date(Math.round((num - 25569) * 86400 * 1000));
+      if (isNaN(date.getTime())) return val.toString().trim();
+      return date.toLocaleDateString("en-GB");
+    }
+
+    // -- CSV Parser ---------------------------------
+    function parseCSV(file) {
+      return new Promise((res, rej) => {
+        const reader = new FileReader();
+        reader.onload = e => {
+          const lines = e.target.result.split(/\r?\n/).filter(l => l.trim());
+          if (lines.length < 2) { res([]); return; }
+          const headers = csvSplit(lines[0]);
+          res(lines.slice(1).map(line => {
+            const vals = csvSplit(line);
+            const obj  = {};
+            headers.forEach((h, i) => { obj[h] = vals[i] ?? ""; });
+            return obj;
+          }));
+        };
+        reader.onerror = rej;
+        reader.readAsText(file);
+      });
+    }
+
+    function csvSplit(line) {
+      const result = []; let cur = ""; let inQ = false;
+      for (const ch of line) {
+        if (ch === '"') inQ = !inQ;
+        else if (ch === "," && !inQ) { result.push(cur.trim()); cur = ""; }
+        else cur += ch;
+      }
+      result.push(cur.trim());
+      return result;
+    }
+
+    // -- XLSX/ODS Parser ----------------------------
+    function parseXLSX(file) {
+      return new Promise((res, rej) => {
+        if (!window.XLSX) { rej(new Error("XLSX library not loaded yet - try again in a moment.")); return; }
+        const reader = new FileReader();
+        reader.onload = e => {
+          try {
+            const wb = XLSX.read(e.target.result, { type: "array" });
+
+            // For George-format files: combine all sheets whose name starts with
+            // "MAIN SHEET" (case-insensitive). Fall back to all sheets if none match,
+            // or just the first sheet if it is a single-sheet file.
+            const mainSheets = wb.SheetNames.filter(n =>
+              n.trim().toUpperCase().startsWith("MAIN SHEET")
+            );
+            const sheetsToRead = mainSheets.length > 0 ? mainSheets : wb.SheetNames;
+
+            const allRows = [];
+            for (const sheetName of sheetsToRead) {
+              const ws   = wb.Sheets[sheetName];
+              const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+              // Tag each row with its source sheet so the format detector can use it
+              rows.forEach(r => { r._source_sheet = sheetName; });
+              allRows.push(...rows);
+            }
+
+            res(allRows);
+          } catch (err) { rej(err); }
+        };
+        reader.onerror = rej;
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    // -- Export current tab ------------------------
+    window.exportCurrentTab = async () => {
+      const statusEl = document.getElementById("import-status");
+      statusEl.textContent = "Preparing export-";
+      statusEl.className = "import-status info";
+      try {
+        const snap = await getDocs(collection(db, "customers"));
+        let all    = snap.docs.map(d => d.data());
+
+        if (activeTab === "sent") {
+          all = all.filter(c => c.sent && c.sent !== "No" && c.sent.trim() !== "");
+        } else if (activeTab === "unsent") {
+          all = all.filter(c => !c.sent || c.sent === "No" || c.sent.trim() === "");
+          if (activeSubTab === "Blank") {
+            all = all.filter(c => !c.sent || c.sent.trim() === "" || c.sent === "No");
+          } else if (activeSubTab) {
+            all = all.filter(c => (c.sent || "").trim() === activeSubTab);
+          }
+        }
+
+        const label = activeTab === "sent" ? "sent"
+                    : activeTab === "unsent" ? ("unsent" + (activeSubTab ? "-" + activeSubTab : ""))
+                    : "all";
+
+        const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Manager","Email Cont.","SPID","Group","Sent","Reply","Everflow Receipt Number","Commission","Date of Signing","Contract Status"];
+        const rows = all.map(c => [
+          c.area, c.practiceName, c.doctorName, c.organisationCode, c.postCode,
+          c.addressLine1, c.icb, c.phone, c.practiceManager, c.emailCont,
+          c.spid, c.group, c.sent, c.reply,
+          c.everflowReceipt, c.commission, c.dateOfSigning, c.contractStatus
+        ].map(v => `"${(v||"").replace(/"/g,'""')}"`));
+
+        const csv  = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+        const blob = new Blob([csv], { type: "text/csv" });
+        const a    = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `urwater-crm-${label}-${new Date().toISOString().slice(0,10)}.csv`;
+        a.click();
+        statusEl.textContent = `- Exported ${all.length} records.`;
+        statusEl.className = "import-status success";
+      } catch(e) {
+        statusEl.textContent = "Export failed: " + e.message;
+        statusEl.className = "import-status error";
+      }
+    };
+
+    // -- Export -------------------------------------
+    window.exportCSV = async () => {
+      const statusEl = document.getElementById("import-status");
+      statusEl.textContent = "Preparing export-";
+      statusEl.className = "import-status info";
+      try {
+        const snap = await getDocs(collection(db, "customers"));
+        const all  = snap.docs.map(d => d.data());
+        const headers = ["Area","Practice Name","Doctor Name","Organisation Code","Post Code","Address Line 1","ICB","Phone","Manager","Email Cont.","SPID","Group","Sent","Reply","Everflow Receipt Number","Commission","Date of Signing","Contract Status"];
+        const rows = all.map(c => [
+          c.area, c.practiceName, c.doctorName, c.organisationCode, c.postCode,
+          c.addressLine1, c.icb, c.phone, c.practiceManager, c.emailCont,
+          c.spid, c.group, c.sent, c.reply,
+          c.everflowReceipt, c.commission, c.dateOfSigning, c.contractStatus
+        ].map(v => `"${(v||"").replace(/"/g,'""')}"`));
+        const csv  = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+        const blob = new Blob([csv], { type: "text/csv" });
+        const a    = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `urwater-crm-${new Date().toISOString().slice(0,10)}.csv`;
+        a.click();
+        statusEl.textContent = `- Exported ${all.length} records.`;
+        statusEl.className = "import-status success";
+      } catch(e) {
+        statusEl.textContent = "Export failed: " + e.message;
+        statusEl.className = "import-status error";
+      }
+    };
+
+    function esc(s) {
+      return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    // -- Sort --------------------------------------
+    function applySortToRows(rows) {
+      return rows.slice().sort((a, b) => {
+        let av = (a[sortField] || "").toString();
+        let bv = (b[sortField] || "").toString();
+
+        // For sent date, parse DD/MM/YYYY into a comparable value
+        if (sortField === "sent") {
+          const parseDate = s => {
+            if (!s || s === "No" || s === "-") return 0;
+            const parts = s.split("/");
+            if (parts.length === 3) return new Date(parts[2], parts[1]-1, parts[0]).getTime();
+            return 0;
+          };
+          av = parseDate(av);
+          bv = parseDate(bv);
+          return sortDir === "asc" ? av - bv : bv - av;
+        }
+
+        // String compare for area / practiceName
+        const cmp = av.localeCompare(bv, "en", { sensitivity: "base" });
+        return sortDir === "asc" ? cmp : -cmp;
+      });
+    }
+
+    window.handleSortSelect = (val) => {
+      const [field, dir] = val.split("_");
+      sortField = field;
+      sortDir   = dir;
+      allDocIds = []; currentPage = 1;
+      if (activeSearch || activeArea || activeSent) {
+        loadFiltered();
+      } else {
+        loadPage();
+      }
+    };
+
+    window.setSort = (field) => {
+      if (sortField === field) {
+        sortDir = sortDir === "asc" ? "desc" : "asc";
+      } else {
+        sortField = field;
+        sortDir   = "asc";
+      }
+      updateSortUI();
+      allDocIds = []; currentPage = 1;
+      if (activeSearch || activeArea || activeSent) {
+        loadFiltered();
+      } else {
+        loadPage();
+      }
+    };
+
+    function updateSortUI() {
+      // Update the sort dropdown to reflect current state
+      const sel = document.getElementById("sort-select");
+      if (sel) sel.value = sortField + "_" + sortDir;
+    }
+
+    window.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("modal").addEventListener("click", e => {
+        if (e.target.id === "modal") closeModal();
+      });
+    });
+  </script>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <style>
+    :root {
+      --bg:      #0d1117;
+      --surface: #161b22;
+      --border:  #21282f;
+      --accent:  #1e7aff;
+      --accent2: #00c896;
+      --text:    #e6edf3;
+      --muted:   #7d8590;
+      --danger:  #f85149;
+      --warn:    #d29922;
+      --radius:  10px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "DM Mono", monospace; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 13px; }
+    .hidden { display: none !important; }
+
+    /* Auth */
+    #auth-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; background: radial-gradient(ellipse at 60% 30%, #0a1f44 0%, #0d1117 70%); }
+    .auth-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 40px 36px; width: 380px; box-shadow: 0 24px 80px rgba(0,0,0,0.6); }
+    .auth-logo { font-family: "Syne", sans-serif; font-size: 22px; font-weight: 800; color: var(--accent); margin-bottom: 6px; }
+    .auth-sub  { color: var(--muted); font-size: 12px; margin-bottom: 28px; }
+    .auth-card label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+    .auth-card input { width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: inherit; font-size: 13px; margin-bottom: 14px; outline: none; transition: border-color .2s; }
+    .auth-card input:focus { border-color: var(--accent); }
+    #login-error { color: var(--danger); font-size: 12px; margin-bottom: 10px; min-height: 16px; }
+
+    /* App shell */
+    #app-screen { display: flex; flex-direction: column; min-height: 100vh; }
+    header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 28px; height: 56px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 50; }
+    .logo { font-family: "Syne", sans-serif; font-size: 18px; font-weight: 800; color: var(--text); }
+    .logo span { color: var(--accent); }
+    .header-right { display: flex; align-items: center; gap: 16px; }
+    #user-email { color: var(--muted); font-size: 12px; }
+
+    /* Buttons */
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: var(--radius); font-family: inherit; font-size: 12px; cursor: pointer; border: none; transition: filter .15s, opacity .15s; }
+    .btn:hover { filter: brightness(1.1); } .btn:active { opacity: .85; } .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary   { background: var(--accent);  color: #fff; }
+    .btn-secondary { background: var(--border);  color: var(--text); }
+    .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+    .btn-icon { background: transparent; border: none; cursor: pointer; font-size: 14px; padding: 4px 6px; border-radius: 6px; transition: background .15s; }
+    .edit-btn { color: var(--accent); } .edit-btn:hover { background: rgba(30,122,255,.12); }
+    .del-btn  { color: var(--danger); } .del-btn:hover  { background: rgba(248,81,73,.12); }
+
+    /* Main */
+    main { flex: 1; padding: 24px 28px; width: 100%; margin: 0 auto; }
+
+    /* Stats */
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+    .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; }
+    .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+    .stat-value { font-family: "Syne", sans-serif; font-size: 28px; font-weight: 700; }
+    .stat-value.blue  { color: var(--accent); }
+    .stat-value.green { color: var(--accent2); }
+    .stat-value.warn  { color: var(--warn); }
+    .stat-value.muted { color: var(--muted); }
+
+    /* Toolbar */
+    .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+    .toolbar input, .toolbar select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 8px 12px; font-family: inherit; font-size: 12px; outline: none; transition: border-color .2s; }
+    .toolbar input { flex: 1; min-width: 200px; }
+    .toolbar input:focus, .toolbar select:focus { border-color: var(--accent); }
+    .toolbar select option { background: var(--surface); }
+    .toolbar-spacer { flex: 1; }
+
+    /* Table */
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+    table { width: 100%; border-collapse: collapse; }
+    thead { background: var(--surface); }
+    th { padding: 10px 14px; text-align: left; font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); white-space: nowrap; }
+    td { padding: 10px 14px; font-size: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: rgba(255,255,255,.03); }
+    .empty-row { text-align: center; color: var(--muted); padding: 40px; }
+
+    /* Badges */
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 100px; font-size: 10px; font-weight: 600; }
+    .badge-prospect   { background: rgba(125,133,144,.15); color: var(--muted); }
+    .badge-signed     { background: rgba(0,200,150,.15);   color: var(--accent2); }
+    .badge-completed  { background: rgba(30,122,255,.15);  color: var(--accent); }
+
+    /* Import status */
+    .import-status { font-size: 12px; padding: 8px 14px; border-radius: var(--radius); margin-top: 8px; }
+    .import-status.info    { background: rgba(30,122,255,.1); color: var(--accent); }
+    .import-status.success { background: rgba(0,200,150,.1);  color: var(--accent2); }
+    .import-status.error   { background: rgba(248,81,73,.1);  color: var(--danger); }
+
+    /* Modal */
+    #modal { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: flex; align-items: center; justify-content: center; z-index: 100; backdrop-filter: blur(4px); }
+    .modal-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px 32px; width: 640px; max-width: 95vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 32px 100px rgba(0,0,0,.6); }
+    .modal-card h2 { font-family: "Syne", sans-serif; font-size: 18px; font-weight: 700; margin-bottom: 20px; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .form-group { margin-bottom: 14px; }
+    .form-group.full { grid-column: 1 / -1; }
+    .form-group label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 5px; }
+    .form-group input, .form-group select { width: 100%; padding: 9px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: inherit; font-size: 13px; outline: none; transition: border-color .2s; }
+    .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
+    .form-group select option { background: var(--surface); }
+    /* Tabs */
+    .tab-bar {
+      display: flex; align-items: center; gap: 4px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px; padding-bottom: 0;
+    }
+    .tab-btn {
+      background: transparent; border: none; border-bottom: 2px solid transparent;
+      color: var(--muted); font-family: inherit; font-size: 12px; font-weight: 600;
+      padding: 10px 18px; cursor: pointer; margin-bottom: -1px;
+      transition: color .15s, border-color .15s;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* Subtabs */
+    .subtab-bar {
+      display: flex; align-items: center; gap: 6px;
+      flex-wrap: wrap; margin-bottom: 14px;
+      padding: 10px 14px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .subtab-btn {
+      background: var(--border); border: none; border-radius: 100px;
+      color: var(--muted); font-family: inherit; font-size: 11px; font-weight: 600;
+      padding: 4px 12px; cursor: pointer; transition: background .15s, color .15s;
+    }
+    .subtab-btn:hover { background: rgba(30,122,255,.15); color: var(--accent); }
+    .subtab-btn.active { background: var(--accent); color: #fff; }
+
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { color: var(--accent); }
+
+    .pagination {
+      display: flex; align-items: center; justify-content: center;
+      gap: 16px; margin-top: 16px; padding-bottom: 24px;
+    }
+
+    .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+  </style>
+</head>
+<body>
+
+<!-- Auth -->
+<div id="auth-screen">
+  <div class="auth-card">
+    <div class="auth-logo">URwater CRM</div>
+    <div class="auth-sub">GP Practice water account management</div>
+    <label>Email address</label>
+    <input id="login-email" type="email" placeholder="you@urwater.co.uk" />
+    <label>Password</label>
+    <input id="login-password" type="password" placeholder="••••••••" onkeydown="if(event.key==='Enter')login()" />
+    <div id="login-error"></div>
+    <button class="btn btn-primary" style="width:100%" onclick="login()">Sign In →</button>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app-screen" class="hidden">
+  <header>
+    <div class="logo">UR<span>water</span> CRM</div>
+    <div class="header-right">
+      <span id="user-email"></span>
+      <button class="btn btn-ghost" onclick="logout()">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="stats">
+      <div class="stat-card"><div class="stat-label">Total Practices</div><div class="stat-value blue" id="stat-total">—</div></div>
+      <div class="stat-card"><div class="stat-label">Emails Sent</div><div class="stat-value green" id="stat-sent">—</div></div>
+      <div class="stat-card"><div class="stat-label">Replies Received</div><div class="stat-value warn" id="stat-reply">—</div></div>
+      <div class="stat-card"><div class="stat-label">Areas Covered</div><div class="stat-value muted" id="stat-areas">—</div></div>
+    </div>
+
+    <!-- Main tabs -->
+    <div class="tab-bar">
+      <button class="tab-btn active" id="tab-all"    onclick="switchTab('all')">All Practices</button>
+      <button class="tab-btn"        id="tab-sent"   onclick="switchTab('sent')">✉ Sent</button>
+      <button class="tab-btn"        id="tab-unsent" onclick="switchTab('unsent')">✗ Unsent</button>
+      <div style="flex:1"></div>
+      <button class="btn btn-secondary" style="font-size:11px;padding:5px 12px" onclick="exportCurrentTab()">⬇ Export this tab</button>
+    </div>
+
+    <!-- Unsent subtabs (shown only when Unsent tab active) -->
+    <div class="subtab-bar" id="subtab-bar" style="display:none">
+      <button class="subtab-btn active" id="subtab-" onclick="switchSubTab('')">All Unsent</button>
+    </div>
+
+    <div class="toolbar">
+      <input id="search-input" type="text" placeholder="Search practice, doctor, postcode, SPID, org code…" oninput="filterTable()" />
+      <select id="area-filter" onchange="filterTable()"><option value="">All areas</option></select>
+      <select id="sort-select" onchange="handleSortSelect(this.value)" title="Sort by">
+        <option value="practiceName_asc">Practice Name A→Z</option>
+        <option value="practiceName_desc">Practice Name Z→A</option>
+        <option value="area_asc">Area A→Z</option>
+        <option value="area_desc">Area Z→A</option>
+        <option value="sent_desc">Sent Date (Newest)</option>
+        <option value="sent_asc">Sent Date (Oldest)</option>
+      </select>
+      <div class="toolbar-spacer"></div>
+      <button class="btn btn-secondary" onclick="triggerImport()">⬆ Import</button>
+      <button class="btn btn-secondary" onclick="triggerEmlUpload()" title="Upload .eml email files to auto-update Sent/Reply">✉ EML Upload</button>
+      <button class="btn btn-primary" onclick="openAdd()">+ Add Practice</button>
+    </div>
+
+    <input type="file" id="import-file" accept=".csv,.xlsx,.xls,.ods" class="hidden" onchange="handleImport(event)" />
+    <div id="import-status"></div>
+    <input type="file" id="eml-file-input" accept=".eml" multiple class="hidden" onchange="handleEmlUpload(event)" />
+    <div id="eml-status"></div>
+
+    <div id="limit-warning" style="display:none;background:rgba(248,81,73,.1);color:#f85149;padding:10px 14px;border-radius:10px;font-size:12px;margin-bottom:10px;">
+      ⚠ Over 1,000 records detected — only showing the first 1,000. Please delete duplicate records in Firebase Console.
+    </div>
+    <div class="table-wrap" style="margin-top:10px">
+      <table>
+        <thead>
+          <tr>
+            <th class="sortable" onclick="setSort('area')" title="Sort by Area">Area ⇅</th>
+            <th>Practice Name</th>
+            <th>Doctor Name</th>
+            <th>Org Code</th>
+            <th>Post Code</th>
+            <th>Address</th>
+            <th>ICB</th>
+            <th>Phone</th>
+            <th>Manager</th>
+            <th>Email</th>
+            <th>SPID</th>
+            <th>Group</th>
+            <th class="sortable" onclick="setSort('sent')" title="Sort by Sent Date">Sent ⇅</th>
+            <th>Reply</th>
+            <th>Everflow Receipt</th>
+            <th>Commission</th>
+            <th>Date of Signing</th>
+            <th>Contract Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="customer-tbody">
+          <tr><td colspan="19" class="empty-row">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<!-- Modal -->
+<div id="modal" class="hidden">
+  <div class="modal-card">
+    <h2 id="modal-title">Add Practice</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Area</label>
+        <input id="f-area" type="text" placeholder="e.g. Yorkshire" />
+      </div>
+      <div class="form-group">
+        <label>Practice Name *</label>
+        <input id="f-practiceName" type="text" placeholder="Kirkgate Medical Centre" />
+      </div>
+      <div class="form-group">
+        <label>Doctor Name</label>
+        <input id="f-doctorName" type="text" placeholder="Dr Jane Smith" />
+      </div>
+      <div class="form-group">
+        <label>Organisation Code</label>
+        <input id="f-organisationCode" type="text" placeholder="B82005" />
+      </div>
+      <div class="form-group">
+        <label>Post Code</label>
+        <input id="f-postCode" type="text" placeholder="LS1 4AP" />
+      </div>
+      <div class="form-group">
+        <label>Address Line 1</label>
+        <input id="f-addressLine1" type="text" placeholder="12 High Street" />
+      </div>
+      <div class="form-group">
+        <label>ICB</label>
+        <input id="f-icb" type="text" placeholder="West Yorkshire ICB" />
+      </div>
+      <div class="form-group">
+        <label>Phone</label>
+        <input id="f-phone" type="text" placeholder="01134 000000" />
+      </div>
+      <div class="form-group">
+        <label>Manager</label>
+        <input id="f-practiceManager" type="text" placeholder="e.g. John Doe" />
+      </div>
+      <div class="form-group">
+        <label>Email Contact</label>
+        <input id="f-emailCont" type="email" placeholder="manager@practice.nhs.uk" />
+      </div>
+      <div class="form-group">
+        <label>SPID</label>
+        <input id="f-spid" type="text" placeholder="3006153308 or EFW289998-0" />
+      </div>
+      <div class="form-group">
+        <label>Group</label>
+        <input id="f-group" type="text" placeholder="e.g. PCN North" />
+      </div>
+      <div class="form-group">
+        <label>Sent Date (DD/MM/YYYY or leave blank)</label>
+        <input id="f-sent" type="text" placeholder="e.g. 12/06/2024" />
+      </div>
+      <div class="form-group">
+        <label>Reply</label>
+        <select id="f-reply">
+          <option>No</option>
+          <option>Yes</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="save-btn" onclick="saveCustomer()">Save</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>URwater CRM</title>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import {
+      getFirestore, collection, addDoc, getDocs, getDoc, doc, updateDoc, deleteDoc, writeBatch, query
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    import {
+      getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, setPersistence, browserSessionPersistence
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyCD5kRxH0-tIemXG4wnmLvv8hnSBXyDsX0",
+      authDomain: "urwater-crm.firebaseapp.com",
+      projectId: "urwater-crm",
+      storageBucket: "urwater-crm.firebasestorage.app",
+      messagingSenderId: "194637169182",
+      appId: "1:194637169182:web:7a72289893a6ff24d7a40f"
+    };
+
+    const app  = initializeApp(firebaseConfig);
+    const db   = getFirestore(app);
+    const auth = getAuth(app);
+
+    // -- Pagination state ---------------------------
+    const PAGE_SIZE = 50;
+    let currentPage    = 1;
+    let totalEstimate  = 0;
+    let activeSearch   = "";
+    let activeArea     = "";
+    let activeSent     = "";
+    let editingId      = null;
+    let activeTab      = "all";     // "all", "sent", "unsent"
+    let activeSubTab   = "";        // unsent reason / "blank"
+    let sortField      = "practiceName"; // default
+    let sortDir        = "asc";          // "asc" or "desc"
+
+    // -- Auth ---------------------------------------
+    onAuthStateChanged(auth, user => {
+      if (user) {
+        document.getElementById("auth-screen").classList.add("hidden");
+        document.getElementById("app-screen").classList.remove("hidden");
+        document.getElementById("user-email").textContent = user.email;
+        loadPage();
+        loadStats();
+        loadAreaFilter();
+        buildSubTabs();
+      } else {
+        document.getElementById("auth-screen").classList.remove("hidden");
+        document.getElementById("app-screen").classList.add("hidden");
+      }
+    });
+
+    window.login = async () => {
+      const email    = document.getElementById("login-email").value.trim();
+      const password = document.getElementById("login-password").value;
+      const errEl    = document.getElementById("login-error");
+      errEl.textContent = "";
+      if (!email)    { errEl.textContent = "Please enter your email address."; return; }
+      if (!password) { errEl.textContent = "Please enter your password."; return; }
+
+      const loginBtn = document.querySelector("#auth-screen .btn-primary");
+      loginBtn.disabled = true;
+      loginBtn.textContent = "Signing in...";
+
+      try {
+        await setPersistence(auth, browserSessionPersistence);
+        await signInWithEmailAndPassword(auth, email, password);
+      } catch (e) {
+        const msgs = {
+          "auth/user-not-found":         "No account found with that email address.",
+          "auth/wrong-password":         "Incorrect password. Please try again.",
+          "auth/invalid-email":          "That email address is not valid.",
+          "auth/invalid-credential":     "Email or password is incorrect.",
+          "auth/too-many-requests":      "Too many failed attempts. Please wait a few minutes and try again.",
+          "auth/network-request-failed": "Network error -- check your connection or disable tracking prevention for this site.",
+          "auth/user-disabled":          "This account has been disabled. Contact your administrator.",
+        };
+        errEl.textContent = msgs[e.code] || ("Sign in failed (" + e.code + ")");
+      } finally {
+        loginBtn.disabled = false;
+        loginBtn.textContent = "Sign In ->";
+      }
+    };
+
+    window.logout = () => signOut(auth);
+
+    // -- Stats (runs once, counts all docs) --------
+    async function loadStats() {
+      try {
+        const snap = await getDocs(collection(db, "customers"));
+        const all  = snap.docs.map(d => d.data());
+        totalEstimate = all.length;
+        document.getElementById("stat-total").textContent  = all.length;
+        document.getElementById("stat-sent").textContent   = all.filter(c => c.sent && c.sent !== "No").length;
+        document.getElementById("stat-reply").textContent  = all.filter(c => c.reply && c.reply !== "No").length;
+        const areas = new Set(all.map(c => c.area).filter(Boolean));
+        document.getElementById("stat-areas").textContent  = areas.size;
+      } catch(e) { console.error("Stats error:", e); }
+    }
+
+    // -- Area filter population ---------------------
+    async function loadAreaFilter() {
+      try {
+        const snap  = await getDocs(collection(db, "customers"));
+        const areas = [...new Set(snap.docs.map(d => d.data().area).filter(Boolean))].sort();
+        const sel   = document.getElementById("area-filter");
+        sel.innerHTML = `<option value="">All areas</option>` +
+          areas.map(a => `<option>${esc(a)}</option>`).join("");
+      } catch(e) {}
+    }
+
+    window.populateAreaFilter = loadAreaFilter;
+
+    // -- Paginated load -----------------------------
+    // When searching/filtering we load all matches client-side (searches are rare, browsing is common)
+    let allDocIds = []; // flat list of all doc IDs in sort order for pagination
+
+    async function loadAllIds() {
+      const snap = await getDocs(collection(db, "customers"));
+      let all    = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      // Apply tab filter
+      if (activeTab === "sent") {
+        all = all.filter(c => c.sent && c.sent !== "No" && c.sent.trim() !== "");
+      } else if (activeTab === "unsent") {
+        all = all.filter(c => !c.sent || c.sent === "No" || c.sent.trim() === "");
+        // Apply subtab (reason) filter
+        if (activeSubTab === "Blank" || activeSubTab === "") {
+          if (activeSubTab === "Blank") {
+            all = all.filter(c => !c.sent || c.sent.trim() === "" || c.sent === "No");
+          }
+          // "" means all unsent - no further filter
+        } else {
+          all = all.filter(c => (c.sent || "").trim() === activeSubTab);
+        }
+      }
+
+      allDocIds = applySortToRows(all).map(r => r.id);
+    }
+
+    async function loadPage() {
+      setTableLoading(true);
+      try {
+        if (!allDocIds.length) await loadAllIds();
+        const start   = (currentPage - 1) * PAGE_SIZE;
+        const pageIds = allDocIds.slice(start, start + PAGE_SIZE);
+        if (!pageIds.length) { renderTable([]); updatePagination(0); setTableLoading(false); return; }
+        // Fetch just this page's docs by ID
+        const rows = await Promise.all(
+          pageIds.map(id => getDoc(doc(db, "customers", id)).then(s => s.exists() ? { id: s.id, ...s.data() } : null))
+        );
+        renderTable(rows.filter(Boolean));
+        updatePagination(pageIds.length);
+      } catch(e) {
+        document.getElementById("customer-tbody").innerHTML =
+          `<tr><td colspan="19" class="empty-row" style="color:var(--danger)">Error: ${esc(e.message)}</td></tr>`;
+      }
+      setTableLoading(false);
+    }
+
+    // -- Search - loads all matching docs client-side --
+    async function loadFiltered() {
+      setTableLoading(true);
+      try {
+        const snap = await getDocs(collection(db, "customers"));
+        let rows   = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+        if (activeSearch) {
+          const q = activeSearch.toLowerCase();
+          rows = rows.filter(c =>
+            [c.practiceName, c.doctorName, c.postCode, c.spid, c.area, c.emailCont, c.organisationCode]
+              .some(f => (f||"").toLowerCase().includes(q))
+          );
+        }
+        if (activeArea) rows = rows.filter(c => c.area === activeArea);
+        if (activeSent === "yes") rows = rows.filter(c => c.sent && c.sent !== "No");
+        if (activeSent === "no")  rows = rows.filter(c => !c.sent || c.sent === "No");
+
+        renderTable(applySortToRows(rows));
+        document.getElementById("page-info").textContent =
+          `${rows.length} result${rows.length !== 1 ? "s" : ""}`;
+        document.getElementById("btn-prev").disabled = true;
+        document.getElementById("btn-next").disabled = true;
+      } catch(e) {
+        document.getElementById("customer-tbody").innerHTML =
+          `<tr><td colspan="19" class="empty-row" style="color:var(--danger)">Search failed: ${esc(e.message)}</td></tr>`;
+      }
+      setTableLoading(false);
+    }
+
+    // -- Tab switching -----------------------------
+    window.switchTab = (tab) => {
+      activeTab    = tab;
+      activeSubTab = "";
+      activeSearch = "";
+      activeArea   = "";
+      activeSent   = "";
+      document.getElementById("search-input").value = "";
+      document.getElementById("area-filter").value  = "";
+      document.getElementById("sent-filter").value  = "";
+      // Update main tab UI
+      document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+      const el = document.getElementById("tab-" + tab);
+      if (el) el.classList.add("active");
+      // Show/hide subtab bar
+      document.getElementById("subtab-bar").style.display = tab === "unsent" ? "flex" : "none";
+      allDocIds = []; currentPage = 1;
+      loadPage();
+    };
+
+    window.switchSubTab = (reason) => {
+      activeSubTab = reason;
+      allDocIds = []; currentPage = 1;
+      // Update subtab UI
+      document.querySelectorAll(".subtab-btn").forEach(b => b.classList.remove("active"));
+      const el = document.getElementById("subtab-" + CSS.escape(reason));
+      if (el) el.classList.add("active");
+      loadPage();
+    };
+
+    // Build subtab buttons from unique unsent reasons
+    async function buildSubTabs() {
+      const snap    = await getDocs(collection(db, "customers"));
+      const all     = snap.docs.map(d => d.data());
+      const unsent  = all.filter(c => !c.sent || c.sent === "No" || c.sent === "");
+      const reasons = [...new Set(unsent.map(c => {
+        const s = (c.sent || "").trim();
+        return s === "" || s === "No" ? "Blank" : s;
+      }))].sort();
+
+      const bar = document.getElementById("subtab-bar");
+      // Keep "All Unsent" button, then add reason buttons
+      bar.innerHTML = `
+        <button class="subtab-btn active" id="subtab-" onclick="switchSubTab('')">All Unsent</button>
+        ${reasons.map(r =>
+          `<button class="subtab-btn" id="subtab-${r}" onclick="switchSubTab('${r.replace(/'/g,"\\'")}')"> ${r}</button>`
+        ).join("")}
+        <div style="flex:1"></div>
+        <button class="btn btn-secondary" style="font-size:11px;padding:5px 12px" onclick="exportCurrentTab()">- Export this tab</button>
+      `;
+    }
+
+    window.filterTable = () => {
+      activeSearch = document.getElementById("search-input").value.trim();
+      activeArea   = document.getElementById("area-filter").value;
+      activeSent   = document.getElementById("sent-filter").value;
+
+      if (activeSearch || activeArea || activeSent) {
+        loadFiltered();
+      } else {
+        allDocIds = []; currentPage = 1;
+        loadPage();
+      }
+    };
+
+    // -- Pagination controls ------------------------
+    window.nextPage = () => {
+      const maxPage = Math.ceil(allDocIds.length / PAGE_SIZE);
+      if (currentPage >= maxPage) return;
+      currentPage++;
+      loadPage();
+    };
+
+    window.prevPage = () => {
+      if (currentPage <= 1) return;
+      currentPage--;
+      loadPage();
+    };
+
+    function updatePagination(rowCount) {
+      const maxPage  = Math.ceil(allDocIds.length / PAGE_SIZE) || 1;
+      const btnPrev  = document.getElementById("btn-prev");
+      const btnNext  = document.getElementById("btn-next");
+      const pageInfo = document.getElementById("page-info");
+      if (btnPrev)  btnPrev.disabled  = currentPage <= 1;
+      if (btnNext)  btnNext.disabled  = currentPage >= maxPage;
+      if (pageInfo) pageInfo.textContent = `Page ${currentPage} of ${maxPage}`;
+    }
+
+    function setTableLoading(on) {
+      const tbody = document.getElementById("customer-tbody");
+      if (on && tbody) {
+        tbody.innerHTML =
+          `<tr><td colspan="19" class="empty-row" style="color:var(--accent)">Loading-</td></tr>`;
+      }
+    }
+
+    // -- Contract status badge helper ---------------
+    function contractStatusClass(s) {
+      return {
+        "Prospect":    "badge-prospect",
+        "In Progress": "badge-inprogress",
+        "Signed":      "badge-signed",
+        "Completed":   "badge-completed",
+        "Cancelled":   "badge-cancelled",
+      }[s] || "badge-prospect";
+    }
+
+    // -- Render -------------------------------------
+    function renderTable(data) {
+      const tbody = document.getElementById("customer-tbody");
+      tbody.innerHTML = "";
+      if (!data.length) {
+        tbody.innerHTML = `<tr><td colspan="19" class="empty-row">No records found.</td></tr>`;
+        return;
+      }
+      const sorted = applySortToRows(data);
+      const rows = sorted.map(c => {
+        const sentClass  = (c.sent  && c.sent  !== "No") ? "badge-signed"   : "badge-prospect";
+        const replyClass = (c.reply && c.reply !== "No") ? "badge-completed" : "badge-prospect";
+        return `<tr>
+          <td title="${esc(c.area)}">${esc(c.area)}</td>
+          <td title="${esc(c.practiceName)}">${esc(c.practiceName)}</td>
+          <td title="${esc(c.doctorName)}">${esc(c.doctorName)}</td>
+          <td title="${esc(c.organisationCode)}">${esc(c.organisationCode)}</td>
+          <td title="${esc(c.postCode)}">${esc(c.postCode)}</td>
+          <td title="${esc(c.addressLine1)}">${esc(c.addressLine1)}</td>
+          <td title="${esc(c.icb)}">${esc(c.icb)}</td>
+          <td title="${esc(c.phone)}">${esc(c.phone)}</td>
+          <td title="${esc(c.practiceManager)}">${esc(c.practiceManager)}</td>
+          <td title="${esc(c.emailCont)}">${esc(c.emailCont)}</td>
+          <td title="${esc(c.spid)}">${esc(c.spid)}</td>
+          <td title="${esc(c.group)}">${esc(c.group)}</td>
+          <td><span class="badge ${sentClass}">${esc(c.sent || "-")}</span></td>
+          <td><span class="badge ${replyClass}">${esc(c.reply || "-")}</span></td>
+          <td title="${esc(c.everflowReceipt)}">${esc(c.everflowReceipt)}</td>
+          <td title="${esc(c.commission)}">${esc(c.commission)}</td>
+          <td title="${esc(c.dateOfSigning)}">${esc(c.dateOfSigning)}</td>
+          <td><span class="badge ${contractStatusClass(c.contractStatus)}">${esc(c.contractStatus || "-")}</span></td>
+          <td class="action-cell">
+            <button class="btn-icon edit-btn" onclick="openEdit('${c.id}')">-</button>
+            <button class="btn-icon del-btn" onclick="deleteCustomer('${c.id}')">-</button>
+          </td>
+        </tr>`;
+      });
+      // Build all HTML at once - much faster than innerHTML +=
+      tbody.innerHTML = rows.join("");
+    }
+
+    // -- Add / Edit ---------------------------------
+    window.openAdd = () => {
+      editingId = null;
+      document.getElementById("modal-title").textContent = "Add Practice";
+      clearForm();
+      document.getElementById("modal").classList.remove("hidden");
+    };
+
+    window.openEdit = (id) => {
+      editingId = id;
+      // Find in current visible rows via a fresh getDocs for just this doc
+      getDoc(doc(db, "customers", id)).then(snap => {
+        if (!snap.exists()) return;
+        const c = snap.data();
+        document.getElementById("modal-title").textContent = "Edit Practice";
+        document.getElementById("f-area").value             = c.area || "";
+        document.getElementById("f-practiceName").value     = c.practiceName || "";
+        document.getElementById("f-doctorName").value       = c.doctorName || "";
+        document.getElementById("f-organisationCode").value = c.organisationCode || "";
+        document.getElementById("f-postCode").value         = c.postCode || "";
+        document.getElementById("f-addressLine1").value     = c.addressLine1 || "";
+        document.getElementById("f-icb").value              = c.icb || "";
+        document.getElementById("f-phone").value            = c.phone || "";
+        document.getElementById("f-practiceManager").value  = c.practiceManager || "";
+        document.getElementById("f-emailCont").value        = c.emailCont || "";
+        document.getElementById("f-spid").value             = c.spid || "";
+        document.getElementById("f-group").value            = c.group || "";
+        document.getElementById("f-sent").value             = c.sent || "";
+        document.getElementById("f-reply").value            = c.reply || "No";
+        document.getElementById("f-everflowReceipt").value  = c.everflowReceipt || "";
+        document.getElementById("f-commission").value       = c.commission || "";
+        document.getElementById("f-dateOfSigning").value    = c.dateOfSigning || "";
+        document.getElementById("f-contractStatus").value   = c.contractStatus || "Prospect";
+        document.getElementById("modal").classList.remove("hidden");
+      });
+    };
+
+    window.closeModal = () => {
+      document.getElementById("modal").classList.add("hidden");
+      editingId = null;
+    };
+
+    window.saveCustomer = async () => {
+      const data = {
+        area:             document.getElementById("f-area").value.trim(),
+        practiceName:     document.getElementById("f-practiceName").value.trim(),
+        doctorName:       document.getElementById("f-doctorName").value.trim(),
+        organisationCode: document.getElementById("f-organisationCode").value.trim(),
+        postCode:         document.getElementById("f-postCode").value.trim(),
+        addressLine1:     document.getElementById("f-addressLine1").value.trim(),
+        icb:              document.getElementById("f-icb").value.trim(),
+        phone:            document.getElementById("f-phone").value.trim(),
+        practiceManager:  document.getElementById("f-practiceManager").value.trim(),
+        emailCont:        document.getElementById("f-emailCont").value.trim(),
+        spid:             document.getElementById("f-spid").value.trim(),
+        group:            document.getElementById("f-group").value.trim(),
+        sent:             document.getElementById("f-sent").value.trim(),
+        reply:            document.getElementById("f-reply").value,
+        everflowReceipt:  document.getElementById("f-everflowReceipt").value.trim(),
+        commission:       document.getElementById("f-commission").value.trim(),
+        dateOfSigning:    document.getElementById("f-dateOfSigning").value.trim(),
+        contractStatus:   document.getElementById("f-contractStatus").value,
+      };
+      if (!data.practiceName) { alert("Practice name is required."); return; }
+
+      const saveBtn = document.getElementById("save-btn");
+      saveBtn.disabled = true; saveBtn.textContent = "Saving-";
+      try {
+        if (editingId) {
+          await updateDoc(doc(db, "customers", editingId), data);
+        } else {
+          data.createdAt = new Date();
+          await addDoc(collection(db, "customers"), data);
+        }
+        closeModal();
+        loadPage(pageStack[pageStack.length - 1] || null);
+        loadStats();
+      } catch (e) {
+        alert("Error saving: " + e.message);
+      } finally {
+        saveBtn.disabled = false; saveBtn.textContent = "Save";
+      }
+    };
+
+    window.deleteCustomer = async (id) => {
+      if (!confirm("Delete this practice? This cannot be undone.")) return;
+      await deleteDoc(doc(db, "customers", id));
+      loadPage(pageStack[pageStack.length - 1] || null);
+      loadStats();
+    };
+
+    function clearForm() {
+      ["f-area","f-practiceName","f-doctorName","f-organisationCode","f-postCode",
+       "f-addressLine1","f-icb","f-phone","f-practiceManager","f-emailCont","f-spid","f-group","f-sent",
+       "f-everflowReceipt","f-commission","f-dateOfSigning"]
+        .forEach(id => { document.getElementById(id).value = ""; });
+      document.getElementById("f-reply").value          = "No";
+      document.getElementById("f-contractStatus").value = "Prospect";
+    }
+
+    // -- Import -------------------------------------
+    const COLUMN_MAP = {
+      area:             ["area"],
+      practiceName:     ["practice name","practicename","practice","company name","company","companyname"],
+      doctorName:       ["doctor name","doctorname","doctor","dr name"],
+      organisationCode: ["organisation code","org code","organisationcode","orgcode","organisation"],
+      postCode:         ["post code","postcode","post_code","zip"],
+      addressLine1:     ["address line 1","address line1","addressline1","address 1","address"],
+      icb:              ["icb","integrated care board"],
+      phone:            ["phone","telephone","tel","contact number","phone number"],
+      practiceManager:  ["practice manager","practicemanager","manager"],
+      emailCont:        ["email cont.","email cont","email contact","email","e-mail","contact email"],
+      spid:             ["spid","supply point id","supply point","meter ref","mpan"],
+      group:            ["group"],
+      sent:             ["sent"],
+      reply:            ["reply","replied"],
+      everflowReceipt:  ["everflow receipt number","everflow receipt","receipt number","everflow"],
+      commission:       ["commission"],
+      dateOfSigning:    ["date of signing","signing date","date signed","signed date"],
+      contractStatus:   ["contract status","contract progress","status"],
+    };
+
+    // -- Fuzzy string similarity (Dice coefficient) -
+    // Returns 0.0 (no match) to 1.0 (identical)
+    function stringSimilarity(a, b) {
+      a = a.toLowerCase().replace(/[^a-z0-9]/g, "");
+      b = b.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (a === b) return 1.0;
+      if (a.length < 2 || b.length < 2) return 0.0;
+      const bigrams = s => {
+        const set = new Map();
+        for (let i = 0; i < s.length - 1; i++) {
+          const bg = s.slice(i, i + 2);
+          set.set(bg, (set.get(bg) || 0) + 1);
+        }
+        return set;
+      };
+      const aB = bigrams(a), bB = bigrams(b);
+      let intersection = 0;
+      for (const [bg, cnt] of aB) {
+        if (bB.has(bg)) intersection += Math.min(cnt, bB.get(bg));
+      }
+      return (2 * intersection) / (a.length - 1 + b.length - 1);
+    }
+
+    // Check if a name is already represented in an existing combined name
+    // Returns true if any component is >60% similar
+    function nameAlreadyPresent(existingCombined, newName) {
+      const parts = existingCombined.split(" / ");
+      return parts.some(p => stringSimilarity(p, newName) > 0.6);
+    }
+
+
+    // ================================================================
+    // EML PROCESSING -- ported from eml_to_spreadsheet.py
+    // ================================================================
+
+    const GEORGE_ADDRS = new Set(["george@urwater.co.uk","info@urwater.co.uk"]);
+
+    // -- EML text parser ----------------------------------------------
+    function parseEml(text) {
+      // Split headers from body
+      const sepIdx = text.search(/\r?\n\r?\n/);
+      const headerText = sepIdx >= 0 ? text.slice(0, sepIdx) : text;
+      const bodyRaw    = sepIdx >= 0 ? text.slice(sepIdx + 2) : "";
+
+      // Parse headers into a map (last value wins for duplicates except Received)
+      const headers = {};
+      const received = [];
+      let lastKey = null;
+      for (const line of headerText.split(/\r?\n/)) {
+        if (/^[ \t]/.test(line) && lastKey) {
+          // Continuation
+          headers[lastKey] = (headers[lastKey] || "") + " " + line.trim();
+        } else {
+          const m = line.match(/^([\w\-]+):\s*(.*)/);
+          if (m) {
+            lastKey = m[1].toLowerCase();
+            if (lastKey === "received") {
+              received.push(m[2]);
+            } else {
+              headers[lastKey] = m[2];
+            }
+          }
+        }
+      }
+
+      // Decode quoted-printable body
+      function decodeQP(s) {
+        return s.replace(/=([0-9A-Fa-f]{2})/g, (_, h) =>
+          String.fromCharCode(parseInt(h, 16))
+        ).replace(/=\r?\n/g, "");
+      }
+
+      // Extract plain text body
+      function getBody(raw) {
+        const ct = (headers["content-type"] || "").toLowerCase();
+        const te = (headers["content-transfer-encoding"] || "").toLowerCase();
+        let text = raw;
+        if (te.includes("quoted-printable")) text = decodeQP(text);
+        else if (te.includes("base64")) {
+          try { text = atob(text.replace(/\s/g, "")); } catch(e) {}
+        }
+        // Strip HTML tags if HTML content
+        if (ct.includes("text/html")) text = text.replace(/<[^>]+>/g, " ");
+        return text;
+      }
+
+      const body = getBody(bodyRaw);
+
+      // Parse date -> DD/MM/YYYY
+      function parseDate(s) {
+        if (!s) return "";
+        s = s.trim();
+        // Try to extract date from various formats
+        // ISO: 2025-06-04
+        let m = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+        if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+        // RFC-2822: "Tue, 2 Apr 2024 08:04:39 +0000"
+        const months = {jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+        m = s.match(/(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})/i);
+        if (m) {
+          const mo = String(months[m[2].toLowerCase()]).padStart(2,"0");
+          return `${m[1].padStart(2,"0")}/${mo}/${m[3]}`;
+        }
+        return "";
+      }
+
+      const subject   = headers["subject"] || "";
+      const toRaw     = headers["to"] || "";
+      const fromRaw   = headers["from"] || "";
+      const dateRaw   = headers["date"] || "";
+
+      const RE_EMAIL   = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+      const RE_SPID    = /meters?[:\s]+(\d{8,12}[A-Z]?)/i;
+      const RE_SPIDS   = /meters?[:\s]+((?:\d{8,12}[A-Z]?(?:\s*[&,]\s*)?)+)/i;
+      const RE_PHONE   = /(0\d{3,4}[\s\-]?\d{3}[\s\-]?\d{3,4})/g;
+      const RE_PRACTICE = /water services to\s+(.+?)(?:\s*\(([A-Z]\d{4,8})\))?\s*\./is;
+
+      const toEmails   = [...(toRaw.match(RE_EMAIL)   || [])].map(e => e.toLowerCase());
+      const fromEmails = [...(fromRaw.match(RE_EMAIL)  || [])].map(e => e.toLowerCase());
+
+      // Parse sent date -- fall back to first Received header
+      let sentDate = parseDate(dateRaw);
+      if (!sentDate) {
+        for (const r of received) {
+          const ts = r.includes(";") ? r.split(";").pop().trim() : r;
+          sentDate = parseDate(ts);
+          if (sentDate) break;
+        }
+      }
+
+      const subjectLower = subject.toLowerCase().trim();
+      const is_reply        = /^(re:|re :|sv:|aw:)/.test(subjectLower);
+      const is_auto_reply   = /^(automatic reply:|auto:|out of office:|autoreply:|auto reply:)/.test(subjectLower);
+      const is_read_receipt = /^(read:|read receipt:|lesen:)/.test(subjectLower);
+      const is_bounce       = /(mail delivery failed|delivery status notification|undeliverable:|delivery failure|returned mail|mailer-daemon|failed to deliver)/.test(subjectLower);
+
+      // For bounces extract the real recipient from body
+      let effectiveToEmails = toEmails;
+      if (is_bounce && (toEmails.length === 0 || toEmails.every(e => e.includes("urwater")))) {
+        const bodyEmails = [...(body.slice(0,1500).match(RE_EMAIL) || [])]
+          .filter(e => !e.includes("urwater") && !e.includes("mailer") && !e.includes("noreply"));
+        if (bodyEmails.length) effectiveToEmails = bodyEmails.map(e => e.toLowerCase());
+      }
+
+      const spidM  = subject.match(RE_SPID);
+      const spid   = spidM ? spidM[1].trim() : "";
+      const spidsM = subject.match(RE_SPIDS);
+      const allSpids = spidsM ? [...spidsM[1].matchAll(/\d{8,12}[A-Z]?/g)].map(m=>m[0]) : (spid ? [spid] : []);
+
+      const phones    = [...(subject.match(RE_PHONE) || [])];
+      const practiceM = body.match(RE_PRACTICE);
+      const practiceName = practiceM ? practiceM[1].replace(/\s+/g," ").trim() : "";
+      const orgCode      = practiceM && practiceM[2] ? practiceM[2].trim() : "";
+
+      return {
+        subject, toEmails: effectiveToEmails, fromEmails, date: sentDate,
+        is_reply, is_auto_reply, is_read_receipt, is_bounce,
+        spid, allSpids, phones, practiceName, orgCode,
+      };
+    }
+
+    // -- Similarity for practice name matching ------------------------
+    function wordSimilarity(a, b) {
+      const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
+      const words = s => new Set(norm(s).split(/\s+/).filter(Boolean));
+      const wa = words(a), wb = words(b);
+      if (!wa.size || !wb.size) return 0;
+      const inter = [...wa].filter(w => wb.has(w)).length;
+      return inter / Math.max(wa.size, wb.size);
+    }
+
+    function earliest(a, b) {
+      // Both DD/MM/YYYY -- pick earlier
+      if (!a) return b;
+      if (!b) return a;
+      const toNum = s => {
+        const p = s.split("/");
+        return p.length === 3 ? parseInt(p[2]+p[1]+p[0]) : 0;
+      };
+      return toNum(a) <= toNum(b) ? a : b;
+    }
+
+    // -- Match one parsed EML against all Firestore records -----------
+    function findMatches(eml, allRecords, strict) {
+      const nonGeorgeTo = eml.toEmails.filter(e => !GEORGE_ADDRS.has(e));
+
+      // 1. Email address (To:)
+      if (nonGeorgeTo.length) {
+        const hits = allRecords.filter(r =>
+          nonGeorgeTo.includes((r.emailCont||"").toLowerCase().trim())
+        );
+        if (hits.length) return hits;
+      }
+
+      // 1b. From: address
+      const nonGeorgeFrom = eml.fromEmails.filter(e =>
+        !GEORGE_ADDRS.has(e) && !e.includes("mailer") && !e.includes("daemon")
+      );
+      if (nonGeorgeFrom.length) {
+        const hits = allRecords.filter(r =>
+          nonGeorgeFrom.includes((r.emailCont||"").toLowerCase().trim())
+        );
+        if (hits.length) return hits;
+      }
+
+      // 2. SPID
+      if (eml.allSpids.length) {
+        const hits = allRecords.filter(r => {
+          const cell = (r.spid||"").trim();
+          return eml.allSpids.some(s => cell === s || cell.includes(s));
+        });
+        if (hits.length) return hits;
+      }
+
+      // 3. Org code from body
+      if (eml.orgCode) {
+        const hits = allRecords.filter(r =>
+          (r.organisationCode||"").trim().toUpperCase() === eml.orgCode.toUpperCase()
+        );
+        if (hits.length) return hits;
+      }
+
+      // 4. Fuzzy practice name (skip for strict/incoming)
+      if (!strict && eml.practiceName) {
+        let best = null, bestScore = 0;
+        for (const r of allRecords) {
+          const score = wordSimilarity(eml.practiceName, r.practiceName||"");
+          if (score > bestScore) { bestScore = score; best = r; }
+        }
+        if (bestScore >= 0.65 && best) return [best];
+      }
+
+      // 5. Phone number (last 10 digits)
+      if (eml.phones.length) {
+        const hits = [];
+        for (const ph of eml.phones) {
+          const digits = ph.replace(/\D/g,"");
+          if (digits.length < 10) continue;
+          const tail = digits.slice(-10);
+          allRecords.forEach(r => {
+            const rd = (r.phone||"").replace(/\D/g,"");
+            if (rd.length >= 10 && rd.slice(-10) === tail && !hits.includes(r)) hits.push(r);
+          });
+        }
+        if (hits.length && (!strict || hits.length === 1)) return hits;
+      }
+
+      return [];
+    }
+
+    // -- Main EML upload handler --------------------------------------
+    window.triggerEmlUpload = () => document.getElementById("eml-file-input").click();
+
+    window.handleEmlUpload = async (e) => {
+      const files = [...e.target.files];
+      if (!files.length) return;
+
+      const statusEl = document.getElementById("eml-status");
+      statusEl.className = "import-status info";
+      statusEl.textContent = "Loading all records for matching...";
+
+      // Load all records from Firestore for matching
+      const snap = await getDocs(collection(db, "customers"));
+      const allRecords = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      let matched = 0, unmatched = 0, updated = 0;
+      const updateMap = {}; // id -> {sent, reply}
+      const unmatchedFiles = [];
+      const log = [];
+
+      for (const file of files) {
+        if (!file.name.endsWith(".eml")) continue;
+        const text = await file.text();
+        const eml  = parseEml(text);
+
+        const fromGeorge = eml.fromEmails.some(e => GEORGE_ADDRS.has(e));
+        const toGeorge   = eml.toEmails.length > 0 && eml.toEmails.every(e => GEORGE_ADDRS.has(e));
+        const incoming   = eml.is_bounce || eml.is_read_receipt || eml.is_auto_reply || eml.is_reply || (toGeorge && !fromGeorge);
+        const strict     = incoming;
+
+        const hits = findMatches(eml, allRecords, strict);
+        if (!hits.length) {
+          unmatched++;
+          unmatchedFiles.push(file.name);
+          log.push({ file: file.name, status: "unmatched", practice: "--", value: "--" });
+          continue;
+        }
+
+        matched++;
+        for (const record of hits) {
+          if (!updateMap[record.id]) updateMap[record.id] = { sent: record.sent||"", reply: record.reply||"" };
+          const cur = updateMap[record.id];
+
+          if (eml.is_bounce) {
+            cur.reply = "Bounced";
+            log.push({ file: file.name, status: "bounce", practice: record.practiceName, value: "Bounced" });
+          } else if (eml.is_read_receipt) {
+            if (!cur.reply || cur.reply.startsWith("Read ")) {
+              const d = earliest(cur.reply.replace("Read ",""), eml.date);
+              cur.reply = `Read ${d}`;
+            }
+            log.push({ file: file.name, status: "read", practice: record.practiceName, value: cur.reply });
+          } else if (eml.is_auto_reply) {
+            if (!cur.reply || cur.reply.startsWith("Auto-reply ")) {
+              const d = earliest(cur.reply.replace("Auto-reply ",""), eml.date);
+              cur.reply = `Auto-reply ${d}`;
+            }
+            log.push({ file: file.name, status: "auto", practice: record.practiceName, value: cur.reply });
+          } else if (eml.is_reply || (toGeorge && !fromGeorge)) {
+            if (!cur.reply || cur.reply.startsWith("Auto-reply ") || cur.reply.startsWith("Read ")) {
+              cur.reply = eml.date || "Yes";
+            } else {
+              cur.reply = earliest(cur.reply, eml.date) || "Yes";
+            }
+            log.push({ file: file.name, status: "reply", practice: record.practiceName, value: cur.reply });
+          } else {
+            // Outbound sent
+            cur.sent = earliest(cur.sent, eml.date) || "Yes";
+            log.push({ file: file.name, status: "sent", practice: record.practiceName, value: cur.sent });
+          }
+        }
+      }
+
+      // Write updates to Firestore
+      statusEl.textContent = `Writing ${Object.keys(updateMap).length} updates to Firestore...`;
+      for (const [id, vals] of Object.entries(updateMap)) {
+        await updateDoc(doc(db, "customers", id), { sent: vals.sent, reply: vals.reply });
+        updated++;
+      }
+
+      // Show results log
+      const logHtml = log.map(l => {
+        const icon = {sent:"[mail]",reply:"<-",auto:"~",read:"@",bounce:"X",unmatched:"?"}[l.status]||"?";
+        const colour = {sent:"var(--accent)",reply:"var(--accent2)",auto:"var(--muted)",
+                        read:"var(--muted)",bounce:"var(--danger)",unmatched:"var(--warn)"}[l.status];
+        return `<div style="padding:2px 0;color:${colour}">${icon} <b>${l.practice}</b> -- ${l.value} <span style="color:var(--muted);font-size:10px">(${l.file})</span></div>`;
+      }).join("");
+
+      statusEl.className = "import-status success";
+      statusEl.innerHTML = `
+        <div style="margin-bottom:8px">
+          <b>Done:</b> ${matched} matched, ${unmatched} unmatched, ${updated} records updated in Firestore.
+          ${unmatchedFiles.length ? `<br><span style="color:var(--warn)">Unmatched: ${unmatchedFiles.join(", ")}</span>` : ""}
+        </div>
+        <div style="max-height:200px;overflow-y:auto;font-size:11px;border-top:1px solid var(--border);padding-top:8px">${logHtml}</div>
+      `;
+
+      allDocIds = []; currentPage = 1;
+      loadPage();
+      loadStats();
+      e.target.value = "";
+    };
+
+    window.triggerImport = () => document.getElementById("import-file").click();
+
     window.handleImport = async (e) => {
       const file = e.target.files[0];
       if (!file) return;
