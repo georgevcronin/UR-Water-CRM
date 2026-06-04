@@ -481,6 +481,329 @@
       return parts.some(p => stringSimilarity(p, newName) > 0.6);
     }
 
+
+    // ================================================================
+    // EML PROCESSING — ported from eml_to_spreadsheet.py
+    // ================================================================
+
+    const GEORGE_ADDRS = new Set(["george@urwater.co.uk","info@urwater.co.uk"]);
+
+    // ── EML text parser ──────────────────────────────────────────────
+    function parseEml(text) {
+      // Split headers from body
+      const sepIdx = text.search(/\r?\n\r?\n/);
+      const headerText = sepIdx >= 0 ? text.slice(0, sepIdx) : text;
+      const bodyRaw    = sepIdx >= 0 ? text.slice(sepIdx + 2) : "";
+
+      // Parse headers into a map (last value wins for duplicates except Received)
+      const headers = {};
+      const received = [];
+      let lastKey = null;
+      for (const line of headerText.split(/\r?\n/)) {
+        if (/^[ \t]/.test(line) && lastKey) {
+          // Continuation
+          headers[lastKey] = (headers[lastKey] || "") + " " + line.trim();
+        } else {
+          const m = line.match(/^([\w\-]+):\s*(.*)/);
+          if (m) {
+            lastKey = m[1].toLowerCase();
+            if (lastKey === "received") {
+              received.push(m[2]);
+            } else {
+              headers[lastKey] = m[2];
+            }
+          }
+        }
+      }
+
+      // Decode quoted-printable body
+      function decodeQP(s) {
+        return s.replace(/=([0-9A-Fa-f]{2})/g, (_, h) =>
+          String.fromCharCode(parseInt(h, 16))
+        ).replace(/=\r?\n/g, "");
+      }
+
+      // Extract plain text body
+      function getBody(raw) {
+        const ct = (headers["content-type"] || "").toLowerCase();
+        const te = (headers["content-transfer-encoding"] || "").toLowerCase();
+        let text = raw;
+        if (te.includes("quoted-printable")) text = decodeQP(text);
+        else if (te.includes("base64")) {
+          try { text = atob(text.replace(/\s/g, "")); } catch(e) {}
+        }
+        // Strip HTML tags if HTML content
+        if (ct.includes("text/html")) text = text.replace(/<[^>]+>/g, " ");
+        return text;
+      }
+
+      const body = getBody(bodyRaw);
+
+      // Parse date → DD/MM/YYYY
+      function parseDate(s) {
+        if (!s) return "";
+        s = s.trim();
+        // Try to extract date from various formats
+        // ISO: 2025-06-04
+        let m = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+        if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+        // RFC-2822: "Tue, 2 Apr 2024 08:04:39 +0000"
+        const months = {jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+        m = s.match(/(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})/i);
+        if (m) {
+          const mo = String(months[m[2].toLowerCase()]).padStart(2,"0");
+          return `${m[1].padStart(2,"0")}/${mo}/${m[3]}`;
+        }
+        return "";
+      }
+
+      const subject   = headers["subject"] || "";
+      const toRaw     = headers["to"] || "";
+      const fromRaw   = headers["from"] || "";
+      const dateRaw   = headers["date"] || "";
+
+      const RE_EMAIL   = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+      const RE_SPID    = /meters?[:\s]+(\d{8,12}[A-Z]?)/i;
+      const RE_SPIDS   = /meters?[:\s]+((?:\d{8,12}[A-Z]?(?:\s*[&,]\s*)?)+)/i;
+      const RE_PHONE   = /(0\d{3,4}[\s\-]?\d{3}[\s\-]?\d{3,4})/g;
+      const RE_PRACTICE = /water services to\s+(.+?)(?:\s*\(([A-Z]\d{4,8})\))?\s*\./is;
+
+      const toEmails   = [...(toRaw.match(RE_EMAIL)   || [])].map(e => e.toLowerCase());
+      const fromEmails = [...(fromRaw.match(RE_EMAIL)  || [])].map(e => e.toLowerCase());
+
+      // Parse sent date — fall back to first Received header
+      let sentDate = parseDate(dateRaw);
+      if (!sentDate) {
+        for (const r of received) {
+          const ts = r.includes(";") ? r.split(";").pop().trim() : r;
+          sentDate = parseDate(ts);
+          if (sentDate) break;
+        }
+      }
+
+      const subjectLower = subject.toLowerCase().trim();
+      const is_reply        = /^(re:|re :|sv:|aw:)/.test(subjectLower);
+      const is_auto_reply   = /^(automatic reply:|auto:|out of office:|autoreply:|auto reply:)/.test(subjectLower);
+      const is_read_receipt = /^(read:|read receipt:|lesen:)/.test(subjectLower);
+      const is_bounce       = /(mail delivery failed|delivery status notification|undeliverable:|delivery failure|returned mail|mailer-daemon|failed to deliver)/.test(subjectLower);
+
+      // For bounces extract the real recipient from body
+      let effectiveToEmails = toEmails;
+      if (is_bounce && (toEmails.length === 0 || toEmails.every(e => e.includes("urwater")))) {
+        const bodyEmails = [...(body.slice(0,1500).match(RE_EMAIL) || [])]
+          .filter(e => !e.includes("urwater") && !e.includes("mailer") && !e.includes("noreply"));
+        if (bodyEmails.length) effectiveToEmails = bodyEmails.map(e => e.toLowerCase());
+      }
+
+      const spidM  = subject.match(RE_SPID);
+      const spid   = spidM ? spidM[1].trim() : "";
+      const spidsM = subject.match(RE_SPIDS);
+      const allSpids = spidsM ? [...spidsM[1].matchAll(/\d{8,12}[A-Z]?/g)].map(m=>m[0]) : (spid ? [spid] : []);
+
+      const phones    = [...(subject.match(RE_PHONE) || [])];
+      const practiceM = body.match(RE_PRACTICE);
+      const practiceName = practiceM ? practiceM[1].replace(/\s+/g," ").trim() : "";
+      const orgCode      = practiceM && practiceM[2] ? practiceM[2].trim() : "";
+
+      return {
+        subject, toEmails: effectiveToEmails, fromEmails, date: sentDate,
+        is_reply, is_auto_reply, is_read_receipt, is_bounce,
+        spid, allSpids, phones, practiceName, orgCode,
+      };
+    }
+
+    // ── Similarity for practice name matching ────────────────────────
+    function wordSimilarity(a, b) {
+      const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
+      const words = s => new Set(norm(s).split(/\s+/).filter(Boolean));
+      const wa = words(a), wb = words(b);
+      if (!wa.size || !wb.size) return 0;
+      const inter = [...wa].filter(w => wb.has(w)).length;
+      return inter / Math.max(wa.size, wb.size);
+    }
+
+    function earliest(a, b) {
+      // Both DD/MM/YYYY — pick earlier
+      if (!a) return b;
+      if (!b) return a;
+      const toNum = s => {
+        const p = s.split("/");
+        return p.length === 3 ? parseInt(p[2]+p[1]+p[0]) : 0;
+      };
+      return toNum(a) <= toNum(b) ? a : b;
+    }
+
+    // ── Match one parsed EML against all Firestore records ───────────
+    function findMatches(eml, allRecords, strict) {
+      const nonGeorgeTo = eml.toEmails.filter(e => !GEORGE_ADDRS.has(e));
+
+      // 1. Email address (To:)
+      if (nonGeorgeTo.length) {
+        const hits = allRecords.filter(r =>
+          nonGeorgeTo.includes((r.emailCont||"").toLowerCase().trim())
+        );
+        if (hits.length) return hits;
+      }
+
+      // 1b. From: address
+      const nonGeorgeFrom = eml.fromEmails.filter(e =>
+        !GEORGE_ADDRS.has(e) && !e.includes("mailer") && !e.includes("daemon")
+      );
+      if (nonGeorgeFrom.length) {
+        const hits = allRecords.filter(r =>
+          nonGeorgeFrom.includes((r.emailCont||"").toLowerCase().trim())
+        );
+        if (hits.length) return hits;
+      }
+
+      // 2. SPID
+      if (eml.allSpids.length) {
+        const hits = allRecords.filter(r => {
+          const cell = (r.spid||"").trim();
+          return eml.allSpids.some(s => cell === s || cell.includes(s));
+        });
+        if (hits.length) return hits;
+      }
+
+      // 3. Org code from body
+      if (eml.orgCode) {
+        const hits = allRecords.filter(r =>
+          (r.organisationCode||"").trim().toUpperCase() === eml.orgCode.toUpperCase()
+        );
+        if (hits.length) return hits;
+      }
+
+      // 4. Fuzzy practice name (skip for strict/incoming)
+      if (!strict && eml.practiceName) {
+        let best = null, bestScore = 0;
+        for (const r of allRecords) {
+          const score = wordSimilarity(eml.practiceName, r.practiceName||"");
+          if (score > bestScore) { bestScore = score; best = r; }
+        }
+        if (bestScore >= 0.65 && best) return [best];
+      }
+
+      // 5. Phone number (last 10 digits)
+      if (eml.phones.length) {
+        const hits = [];
+        for (const ph of eml.phones) {
+          const digits = ph.replace(/\D/g,"");
+          if (digits.length < 10) continue;
+          const tail = digits.slice(-10);
+          allRecords.forEach(r => {
+            const rd = (r.phone||"").replace(/\D/g,"");
+            if (rd.length >= 10 && rd.slice(-10) === tail && !hits.includes(r)) hits.push(r);
+          });
+        }
+        if (hits.length && (!strict || hits.length === 1)) return hits;
+      }
+
+      return [];
+    }
+
+    // ── Main EML upload handler ──────────────────────────────────────
+    window.triggerEmlUpload = () => document.getElementById("eml-file-input").click();
+
+    window.handleEmlUpload = async (e) => {
+      const files = [...e.target.files];
+      if (!files.length) return;
+
+      const statusEl = document.getElementById("eml-status");
+      statusEl.className = "import-status info";
+      statusEl.textContent = "Loading all records for matching...";
+
+      // Load all records from Firestore for matching
+      const snap = await getDocs(collection(db, "customers"));
+      const allRecords = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      let matched = 0, unmatched = 0, updated = 0;
+      const updateMap = {}; // id -> {sent, reply}
+      const unmatchedFiles = [];
+      const log = [];
+
+      for (const file of files) {
+        if (!file.name.endsWith(".eml")) continue;
+        const text = await file.text();
+        const eml  = parseEml(text);
+
+        const fromGeorge = eml.fromEmails.some(e => GEORGE_ADDRS.has(e));
+        const toGeorge   = eml.toEmails.length > 0 && eml.toEmails.every(e => GEORGE_ADDRS.has(e));
+        const incoming   = eml.is_bounce || eml.is_read_receipt || eml.is_auto_reply || eml.is_reply || (toGeorge && !fromGeorge);
+        const strict     = incoming;
+
+        const hits = findMatches(eml, allRecords, strict);
+        if (!hits.length) {
+          unmatched++;
+          unmatchedFiles.push(file.name);
+          log.push({ file: file.name, status: "unmatched", practice: "—", value: "—" });
+          continue;
+        }
+
+        matched++;
+        for (const record of hits) {
+          if (!updateMap[record.id]) updateMap[record.id] = { sent: record.sent||"", reply: record.reply||"" };
+          const cur = updateMap[record.id];
+
+          if (eml.is_bounce) {
+            cur.reply = "Bounced";
+            log.push({ file: file.name, status: "bounce", practice: record.practiceName, value: "Bounced" });
+          } else if (eml.is_read_receipt) {
+            if (!cur.reply || cur.reply.startsWith("Read ")) {
+              const d = earliest(cur.reply.replace("Read ",""), eml.date);
+              cur.reply = `Read ${d}`;
+            }
+            log.push({ file: file.name, status: "read", practice: record.practiceName, value: cur.reply });
+          } else if (eml.is_auto_reply) {
+            if (!cur.reply || cur.reply.startsWith("Auto-reply ")) {
+              const d = earliest(cur.reply.replace("Auto-reply ",""), eml.date);
+              cur.reply = `Auto-reply ${d}`;
+            }
+            log.push({ file: file.name, status: "auto", practice: record.practiceName, value: cur.reply });
+          } else if (eml.is_reply || (toGeorge && !fromGeorge)) {
+            if (!cur.reply || cur.reply.startsWith("Auto-reply ") || cur.reply.startsWith("Read ")) {
+              cur.reply = eml.date || "Yes";
+            } else {
+              cur.reply = earliest(cur.reply, eml.date) || "Yes";
+            }
+            log.push({ file: file.name, status: "reply", practice: record.practiceName, value: cur.reply });
+          } else {
+            // Outbound sent
+            cur.sent = earliest(cur.sent, eml.date) || "Yes";
+            log.push({ file: file.name, status: "sent", practice: record.practiceName, value: cur.sent });
+          }
+        }
+      }
+
+      // Write updates to Firestore
+      statusEl.textContent = `Writing ${Object.keys(updateMap).length} updates to Firestore...`;
+      for (const [id, vals] of Object.entries(updateMap)) {
+        await updateDoc(doc(db, "customers", id), { sent: vals.sent, reply: vals.reply });
+        updated++;
+      }
+
+      // Show results log
+      const logHtml = log.map(l => {
+        const icon = {sent:"✉",reply:"<-",auto:"~",read:"@",bounce:"X",unmatched:"?"}[l.status]||"?";
+        const colour = {sent:"var(--accent)",reply:"var(--accent2)",auto:"var(--muted)",
+                        read:"var(--muted)",bounce:"var(--danger)",unmatched:"var(--warn)"}[l.status];
+        return `<div style="padding:2px 0;color:${colour}">${icon} <b>${l.practice}</b> — ${l.value} <span style="color:var(--muted);font-size:10px">(${l.file})</span></div>`;
+      }).join("");
+
+      statusEl.className = "import-status success";
+      statusEl.innerHTML = `
+        <div style="margin-bottom:8px">
+          <b>Done:</b> ${matched} matched, ${unmatched} unmatched, ${updated} records updated in Firestore.
+          ${unmatchedFiles.length ? `<br><span style="color:var(--warn)">Unmatched: ${unmatchedFiles.join(", ")}</span>` : ""}
+        </div>
+        <div style="max-height:200px;overflow-y:auto;font-size:11px;border-top:1px solid var(--border);padding-top:8px">${logHtml}</div>
+      `;
+
+      allDocIds = []; currentPage = 1;
+      loadPage();
+      loadStats();
+      e.target.value = "";
+    };
+
     window.triggerImport = () => document.getElementById("import-file").click();
 
     window.handleImport = async (e) => {
@@ -1040,11 +1363,14 @@
       </select>
       <div class="toolbar-spacer"></div>
       <button class="btn btn-secondary" onclick="triggerImport()">⬆ Import</button>
+      <button class="btn btn-secondary" onclick="triggerEmlUpload()" title="Upload .eml email files to auto-update Sent/Reply">✉ EML Upload</button>
       <button class="btn btn-primary" onclick="openAdd()">+ Add Practice</button>
     </div>
 
     <input type="file" id="import-file" accept=".csv,.xlsx,.xls,.ods" class="hidden" onchange="handleImport(event)" />
     <div id="import-status"></div>
+    <input type="file" id="eml-file-input" accept=".eml" multiple class="hidden" onchange="handleEmlUpload(event)" />
+    <div id="eml-status"></div>
 
     <div id="limit-warning" style="display:none;background:rgba(248,81,73,.1);color:#f85149;padding:10px 14px;border-radius:10px;font-size:12px;margin-bottom:10px;">
       ⚠ Over 1,000 records detected — only showing the first 1,000. Please delete duplicate records in Firebase Console.
