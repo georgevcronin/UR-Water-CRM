@@ -67,7 +67,7 @@
         await signInWithEmailAndPassword(auth, email, password);
       } catch (e) {
         if (e.code === "auth/network-request-failed") {
-          errEl.textContent = "Network error — check your connection or disable tracking prevention for this site.";
+          errEl.textContent = "Network error -- check your connection or disable tracking prevention for this site.";
         } else {
           errEl.textContent = "Invalid credentials. Please try again.";
         }
@@ -483,12 +483,12 @@
 
 
     // ================================================================
-    // EML PROCESSING — ported from eml_to_spreadsheet.py
+    // EML PROCESSING -- ported from eml_to_spreadsheet.py
     // ================================================================
 
     const GEORGE_ADDRS = new Set(["george@urwater.co.uk","info@urwater.co.uk"]);
 
-    // ── EML text parser ──────────────────────────────────────────────
+    // -- EML text parser ----------------------------------------------
     function parseEml(text) {
       // Split headers from body
       const sepIdx = text.search(/\r?\n\r?\n/);
@@ -539,7 +539,7 @@
 
       const body = getBody(bodyRaw);
 
-      // Parse date → DD/MM/YYYY
+      // Parse date -> DD/MM/YYYY
       function parseDate(s) {
         if (!s) return "";
         s = s.trim();
@@ -571,7 +571,7 @@
       const toEmails   = [...(toRaw.match(RE_EMAIL)   || [])].map(e => e.toLowerCase());
       const fromEmails = [...(fromRaw.match(RE_EMAIL)  || [])].map(e => e.toLowerCase());
 
-      // Parse sent date — fall back to first Received header
+      // Parse sent date -- fall back to first Received header
       let sentDate = parseDate(dateRaw);
       if (!sentDate) {
         for (const r of received) {
@@ -612,7 +612,7 @@
       };
     }
 
-    // ── Similarity for practice name matching ────────────────────────
+    // -- Similarity for practice name matching ------------------------
     function wordSimilarity(a, b) {
       const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
       const words = s => new Set(norm(s).split(/\s+/).filter(Boolean));
@@ -623,7 +623,7 @@
     }
 
     function earliest(a, b) {
-      // Both DD/MM/YYYY — pick earlier
+      // Both DD/MM/YYYY -- pick earlier
       if (!a) return b;
       if (!b) return a;
       const toNum = s => {
@@ -633,7 +633,7 @@
       return toNum(a) <= toNum(b) ? a : b;
     }
 
-    // ── Match one parsed EML against all Firestore records ───────────
+    // -- Match one parsed EML against all Firestore records -----------
     function findMatches(eml, allRecords, strict) {
       const nonGeorgeTo = eml.toEmails.filter(e => !GEORGE_ADDRS.has(e));
 
@@ -701,7 +701,7 @@
       return [];
     }
 
-    // ── Main EML upload handler ──────────────────────────────────────
+    // -- Main EML upload handler --------------------------------------
     window.triggerEmlUpload = () => document.getElementById("eml-file-input").click();
 
     window.handleEmlUpload = async (e) => {
@@ -735,7 +735,7 @@
         if (!hits.length) {
           unmatched++;
           unmatchedFiles.push(file.name);
-          log.push({ file: file.name, status: "unmatched", practice: "—", value: "—" });
+          log.push({ file: file.name, status: "unmatched", practice: "--", value: "--" });
           continue;
         }
 
@@ -783,10 +783,10 @@
 
       // Show results log
       const logHtml = log.map(l => {
-        const icon = {sent:"✉",reply:"<-",auto:"~",read:"@",bounce:"X",unmatched:"?"}[l.status]||"?";
+        const icon = {sent:"[mail]",reply:"<-",auto:"~",read:"@",bounce:"X",unmatched:"?"}[l.status]||"?";
         const colour = {sent:"var(--accent)",reply:"var(--accent2)",auto:"var(--muted)",
                         read:"var(--muted)",bounce:"var(--danger)",unmatched:"var(--warn)"}[l.status];
-        return `<div style="padding:2px 0;color:${colour}">${icon} <b>${l.practice}</b> — ${l.value} <span style="color:var(--muted);font-size:10px">(${l.file})</span></div>`;
+        return `<div style="padding:2px 0;color:${colour}">${icon} <b>${l.practice}</b> -- ${l.value} <span style="color:var(--muted);font-size:10px">(${l.file})</span></div>`;
       }).join("");
 
       statusEl.className = "import-status success";
@@ -831,7 +831,64 @@
           colIdx[field] = aliases.find(a => headers.includes(a)) ?? null;
         }
 
-        statusEl.textContent = `Detected format: ${format === "everflow" ? "Everflow sheet" : format === "george" ? "George sheet" : "Mixed/combined sheet"} - processing-`;
+        statusEl.textContent = `Detected format: ${
+          format === "everflow" ? "Everflow sheet" :
+          format === "george"   ? "George sheet" :
+          format === "eml_output" ? "EML output spreadsheet - updating Sent/Reply only" :
+          "Mixed/combined sheet"} - processing...`;
+
+        // -- EML output: update Sent/Reply on existing records only --
+        if (format === "eml_output") {
+          let updated = 0, skippedEml = 0;
+          const existingSnap = await getDocs(collection(db, "customers"));
+          const existingAll  = existingSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+          for (const row of rows) {
+            const rowSent    = excelDateToString((row["Sent"]   || row["sent"]   || "").toString().trim());
+            const rowReply   = excelDateToString((row["Reply"]  || row["reply"]  || "").toString().trim());
+            if (!rowSent && !rowReply) { skippedEml++; continue; }
+
+            const rowOrg     = (row["Organisation Code"] || row["organisation code"] || "").toString().trim().toUpperCase();
+            const rowEmail   = (row["Email Cont."] || row["email cont."] || row["Email"] || "").toString().trim().toLowerCase();
+            const rowName    = (row["Practice Name"] || row["practice name"] || row["Company Name"] || "").toString().trim();
+            const rowPostCode= (row["Post Code"] || row["post code"] || row["postcode"] || "").toString().trim().toLowerCase();
+
+            let match = null;
+            if (rowOrg)      match = existingAll.find(r => (r.organisationCode||"").trim().toUpperCase() === rowOrg);
+            if (!match && rowEmail)    match = existingAll.find(r => (r.emailCont||"").trim().toLowerCase() === rowEmail);
+            if (!match && rowPostCode) match = existingAll.find(r => (r.postCode||"").trim().toLowerCase() === rowPostCode);
+            if (!match && rowName) {
+              let best = null, bestScore = 0;
+              for (const r of existingAll) {
+                const score = wordSimilarity(rowName, r.practiceName||"");
+                if (score > bestScore) { bestScore = score; best = r; }
+              }
+              if (bestScore >= 0.65) match = best;
+            }
+
+            if (!match) { skippedEml++; continue; }
+
+            const updates = {};
+            if (rowSent && (!match.sent || match.sent === "No")) updates.sent = rowSent;
+            if (rowReply) {
+              const cur = match.reply || "";
+              if (!cur || cur === "No" || cur.startsWith("Auto-reply") || cur.startsWith("Read")) {
+                updates.reply = rowReply;
+              }
+            }
+            if (Object.keys(updates).length) {
+              await updateDoc(doc(db, "customers", match.id), updates);
+              updated++;
+            } else { skippedEml++; }
+          }
+
+          statusEl.textContent = `Done: ${updated} records updated${skippedEml ? ` (${skippedEml} skipped)` : ""}.`;
+          statusEl.className = "import-status success";
+          allDocIds = []; currentPage = 1;
+          loadPage(); loadStats(); loadAreaFilter(); buildSubTabs();
+          e.target.value = "";
+          return;
+        }
 
         let skipped = 0;
         const validRecords = [];
@@ -1002,8 +1059,25 @@
         reader.onload = e => {
           try {
             const wb = XLSX.read(e.target.result, { type: "array" });
-            const ws = wb.Sheets[wb.SheetNames[0]];
-            res(XLSX.utils.sheet_to_json(ws, { defval: "" }));
+
+            // For George-format files: combine all sheets whose name starts with
+            // "MAIN SHEET" (case-insensitive). Fall back to all sheets if none match,
+            // or just the first sheet if it is a single-sheet file.
+            const mainSheets = wb.SheetNames.filter(n =>
+              n.trim().toUpperCase().startsWith("MAIN SHEET")
+            );
+            const sheetsToRead = mainSheets.length > 0 ? mainSheets : wb.SheetNames;
+
+            const allRows = [];
+            for (const sheetName of sheetsToRead) {
+              const ws   = wb.Sheets[sheetName];
+              const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+              // Tag each row with its source sheet so the format detector can use it
+              rows.forEach(r => { r._source_sheet = sheetName; });
+              allRows.push(...rows);
+            }
+
+            res(allRows);
           } catch (err) { rej(err); }
         };
         reader.onerror = rej;
