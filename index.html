@@ -61,16 +61,30 @@
       const password = document.getElementById("login-password").value;
       const errEl    = document.getElementById("login-error");
       errEl.textContent = "";
+      if (!email)    { errEl.textContent = "Please enter your email address."; return; }
+      if (!password) { errEl.textContent = "Please enter your password."; return; }
+
+      const loginBtn = document.querySelector("#auth-screen .btn-primary");
+      loginBtn.disabled = true;
+      loginBtn.textContent = "Signing in...";
+
       try {
-        // Use session persistence to avoid tracking prevention storage blocks
         await setPersistence(auth, browserSessionPersistence);
         await signInWithEmailAndPassword(auth, email, password);
       } catch (e) {
-        if (e.code === "auth/network-request-failed") {
-          errEl.textContent = "Network error -- check your connection or disable tracking prevention for this site.";
-        } else {
-          errEl.textContent = "Invalid credentials. Please try again.";
-        }
+        const msgs = {
+          "auth/user-not-found":         "No account found with that email address.",
+          "auth/wrong-password":         "Incorrect password. Please try again.",
+          "auth/invalid-email":          "That email address is not valid.",
+          "auth/invalid-credential":     "Email or password is incorrect.",
+          "auth/too-many-requests":      "Too many failed attempts. Please wait a few minutes and try again.",
+          "auth/network-request-failed": "Network error -- check your connection or disable tracking prevention for this site.",
+          "auth/user-disabled":          "This account has been disabled. Contact your administrator.",
+        };
+        errEl.textContent = msgs[e.code] || ("Sign in failed (" + e.code + ")");
+      } finally {
+        loginBtn.disabled = false;
+        loginBtn.textContent = "Sign In ->";
       }
     };
 
@@ -1117,8 +1131,7 @@
           c.everflowReceipt, c.commission, c.dateOfSigning, c.contractStatus
         ].map(v => `"${(v||"").replace(/"/g,'""')}"`));
 
-        const csv  = [headers.join(","), ...rows.map(r => r.join(","))].join("
-");
+        const csv  = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
         const blob = new Blob([csv], { type: "text/csv" });
         const a    = document.createElement("a");
         a.href = URL.createObjectURL(blob);
