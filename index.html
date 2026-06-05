@@ -913,7 +913,11 @@
             if (!match) { skippedEml++; continue; }
 
             const updates = {};
-            if (rowSent && (!match.sent || match.sent === "No")) updates.sent = rowSent;
+            // Convert reply date too
+            const rowReplyConverted = excelDateToString(rowReply);
+            // If reply filled but sent empty, use reply as sent
+            const effectiveSent = rowSent || (rowReplyConverted && rowReplyConverted !== "No" ? rowReplyConverted : "");
+            if (effectiveSent && (!match.sent || match.sent === "No")) updates.sent = effectiveSent;
             if (rowReply) {
               const cur = match.reply || "";
               if (!cur || cur === "No" || cur.startsWith("Auto-reply") || cur.startsWith("Read")) {
@@ -962,8 +966,12 @@
           }
 
           if (!norm.practiceName && !norm.organisationCode) { skipped++; continue; }
-          if (norm.sent) norm.sent                   = excelDateToString(norm.sent);
-          if (norm.reply) norm.reply                 = excelDateToString(norm.reply);
+          if (norm.sent)  norm.sent  = excelDateToString(norm.sent);
+          if (norm.reply) norm.reply = excelDateToString(norm.reply);
+          // If reply is filled but sent is blank, use reply date as sent date
+          if (norm.reply && norm.reply !== "No" && (!norm.sent || norm.sent === "No" || norm.sent.trim() === "")) {
+            norm.sent = norm.reply;
+          }
           if (norm.dateOfSigning) norm.dateOfSigning = excelDateToString(norm.dateOfSigning);
           norm.sourceFormat = format;
           norm.importedAt   = new Date().toISOString();
@@ -1056,12 +1064,36 @@
     // -- Excel date conversion ----------------------
     function excelDateToString(val) {
       if (!val && val !== 0) return "";
-      if (typeof val === "string" && isNaN(val.trim())) return val.trim();
-      const num = typeof val === "string" ? parseFloat(val.trim()) : val;
-      if (isNaN(num)) return val.toString().trim();
-      const date = new Date(Math.round((num - 25569) * 86400 * 1000));
-      if (isNaN(date.getTime())) return val.toString().trim();
-      return date.toLocaleDateString("en-GB");
+      const s = val.toString().trim();
+      if (!s) return "";
+
+      // Already DD/MM/YYYY
+      if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) return s;
+
+      // YYYY-MM-DD (ISO / Python script output)
+      let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+
+      // DD-MM-YYYY
+      m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+      if (m) return `${m[1].padStart(2,"0")}/${m[2].padStart(2,"0")}/${m[3]}`;
+
+      // D/M/YY or D/M/YYYY with single digits
+      m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+      if (m) {
+        const yr = m[3].length === 2 ? "20" + m[3] : m[3];
+        return `${m[1].padStart(2,"0")}/${m[2].padStart(2,"0")}/${yr}`;
+      }
+
+      // Excel serial number
+      const num = parseFloat(s);
+      if (!isNaN(num) && s === num.toString() && num > 1000) {
+        const date = new Date(Math.round((num - 25569) * 86400 * 1000));
+        if (!isNaN(date.getTime())) return date.toLocaleDateString("en-GB");
+      }
+
+      // Unrecognised - return as is
+      return s;
     }
 
     // -- CSV Parser ---------------------------------
