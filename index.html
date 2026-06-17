@@ -1554,7 +1554,93 @@
       document.getElementById("modal").addEventListener("click", e => {
         if (e.target.id === "modal") closeModal();
       });
+      document.getElementById("sample-modal").addEventListener("click", e => {
+        if (e.target.id === "sample-modal") closeSampleModal();
+      });
     });
+
+    // -- Sample Batch Export -----------------------
+    window.openSampleModal = async () => {
+      document.getElementById("sample-status").textContent = "";
+      document.getElementById("sample-status").className  = "";
+      document.getElementById("sample-modal").classList.remove("hidden");
+      // Clone areas from the existing area filter
+      const src  = document.getElementById("area-filter");
+      const dest = document.getElementById("sample-area");
+      dest.innerHTML = '<option value="">Any area</option>' +
+        [...src.options].slice(1).map(o => `<option value="${esc(o.value)}">${esc(o.text)}</option>`).join("");
+    };
+
+    window.closeSampleModal = () => {
+      document.getElementById("sample-modal").classList.add("hidden");
+    };
+
+    window.exportSample = async () => {
+      const count    = parseInt(document.getElementById("sample-count").value);
+      const area     = document.getElementById("sample-area").value;
+      const statusEl = document.getElementById("sample-status");
+      statusEl.className   = "import-status info";
+      statusEl.textContent = "Loading practices...";
+
+      try {
+        if (!window.XLSX) throw new Error("XLSX library not loaded yet — try again in a moment.");
+
+        const snap = await getDocs(collection(db, "customers"));
+        let pool = snap.docs.map(d => d.data());
+
+        // Only uncontacted practices with an email address
+        pool = pool.filter(c => {
+          const unsent   = !c.sent || c.sent === "No" || c.sent.trim() === "";
+          const hasEmail = (c.emailCont || "").trim() !== "";
+          return unsent && hasEmail;
+        });
+
+        if (area) pool = pool.filter(c => c.area === area);
+
+        if (!pool.length) {
+          statusEl.className   = "import-status error";
+          statusEl.textContent = "No uncontacted practices with email addresses found" + (area ? " in that area." : ".");
+          return;
+        }
+
+        // Fisher-Yates shuffle then take N
+        for (let i = pool.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [pool[i], pool[j]] = [pool[j], pool[i]];
+        }
+        const sample = pool.slice(0, count);
+
+        // Build ODS
+        const headers = [
+          "Area", "Practice Name", "Doctor Name", "Organisation Code",
+          "Post Code", "Address Line 1", "ICB", "Phone",
+          "Practice Manager", "Email Contact", "SPID", "Group"
+        ];
+        const rows = sample.map(c => [
+          c.area, c.practiceName, c.doctorName, c.organisationCode,
+          c.postCode, c.addressLine1, c.icb, c.phone,
+          c.practiceManager, c.emailCont, c.spid, c.group
+        ].map(v => v || ""));
+
+        const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+        ws["!cols"] = [12,32,24,16,10,30,25,16,22,32,16,16].map(w => ({ wch: w }));
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Sample Batch");
+
+        const buf  = XLSX.write(wb, { bookType: "ods", type: "array" });
+        const blob = new Blob([buf], { type: "application/vnd.oasis.opendocument.spreadsheet" });
+        const a    = document.createElement("a");
+        a.href     = URL.createObjectURL(blob);
+        a.download = `urwater-sample-${count}-${new Date().toISOString().slice(0,10)}.ods`;
+        a.click();
+
+        statusEl.className   = "import-status success";
+        statusEl.textContent = `Exported ${sample.length} practice${sample.length !== 1 ? "s" : ""} — ${pool.length} uncontacted available${area ? " in " + area : ""}.`;
+      } catch (err) {
+        statusEl.className   = "import-status error";
+        statusEl.textContent = "Export failed: " + err.message;
+      }
+    };
   </script>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -1853,6 +1939,7 @@
       <div class="toolbar-spacer"></div>
       <button class="btn btn-secondary" onclick="triggerImport()">⬆ Import</button>
       <button class="btn btn-secondary" onclick="triggerEmlUpload()" title="Upload .eml email files to auto-update Sent/Reply">✉ EML Upload</button>
+      <button class="btn btn-secondary" onclick="openSampleModal()" title="Export a random batch of uncontacted practices as ODS">⚡ Sample Batch</button>
       <button class="btn btn-primary" onclick="openAdd()">+ Add Practice</button>
     </div>
 
@@ -1965,6 +2052,38 @@
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" id="save-btn" onclick="saveCustomer()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Sample Batch Modal -->
+<div id="sample-modal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)">
+  <div class="modal-card" style="width:480px">
+    <h2>Sample Batch Export</h2>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:20px;line-height:1.6">
+      Picks a random selection of <strong style="color:var(--text)">uncontacted practices that have an email address</strong> and exports them as an ODS file — ready for you to collect more data and turn into outreach emails.
+    </p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Batch Size</label>
+        <select id="sample-count">
+          <option value="5">5 practices</option>
+          <option value="10" selected>10 practices</option>
+          <option value="20">20 practices</option>
+          <option value="30">30 practices</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Limit to Area (optional)</label>
+        <select id="sample-area">
+          <option value="">Any area</option>
+        </select>
+      </div>
+    </div>
+    <div id="sample-status" style="margin-top:4px"></div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeSampleModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="exportSample()">⬇ Export ODS</button>
     </div>
   </div>
 </div>
