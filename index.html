@@ -336,7 +336,7 @@
         const replyClass = (c.reply && c.reply !== "No") ? "badge-completed" : "badge-prospect";
         return `<tr>
           <td title="${esc(c.area)}">${esc(c.area)}</td>
-          <td title="${esc(c.practiceName)}">${esc(c.practiceName)}</td>
+          <td title="${esc(c.practiceName)}" style="cursor:pointer" onclick="openTimeline('${c.id}')"><span style="color:var(--accent)">${esc(c.practiceName)}</span></td>
           <td title="${esc(c.doctorName)}">${esc(c.doctorName)}</td>
           <td title="${esc(c.organisationCode)}">${esc(c.organisationCode)}</td>
           <td title="${esc(c.postCode)}">${esc(c.postCode)}</td>
@@ -1011,23 +1011,30 @@
 
         matched++;
         for (const record of hits) {
-          if (!updateMap[record.id]) updateMap[record.id] = { sent: record.sent||"", reply: record.reply||"" };
-          const cur = updateMap[record.id];
+          if (!updateMap[record.id]) updateMap[record.id] = {
+            sent: record.sent || "", reply: record.reply || "",
+            emails: [...(record.emails || [])]
+          };
+          const cur      = updateMap[record.id];
+          const emailRec = { date: eml.date || "", subject: eml.subject || "", from: eml.fromEmails.join(", "), to: eml.toEmails.join(", "), type: "" };
 
           if (eml.is_bounce) {
             cur.reply = "Bounced";
+            emailRec.type = "bounce";
             log.push({ file: file.name, status: "bounce", practice: record.practiceName, value: "Bounced" });
           } else if (eml.is_read_receipt) {
             if (!cur.reply || cur.reply.startsWith("Read ")) {
               const d = earliest(cur.reply.replace("Read ",""), eml.date);
               cur.reply = `Read ${d}`;
             }
+            emailRec.type = "read";
             log.push({ file: file.name, status: "read", practice: record.practiceName, value: cur.reply });
           } else if (eml.is_auto_reply) {
             if (!cur.reply || cur.reply.startsWith("Auto-reply ")) {
               const d = earliest(cur.reply.replace("Auto-reply ",""), eml.date);
               cur.reply = `Auto-reply ${d}`;
             }
+            emailRec.type = "auto";
             log.push({ file: file.name, status: "auto", practice: record.practiceName, value: cur.reply });
           } else if (eml.is_reply || (toGeorge && !fromGeorge)) {
             if (!cur.reply || cur.reply.startsWith("Auto-reply ") || cur.reply.startsWith("Read ")) {
@@ -1035,12 +1042,18 @@
             } else {
               cur.reply = earliest(cur.reply, eml.date) || "Yes";
             }
+            emailRec.type = "reply";
             log.push({ file: file.name, status: "reply", practice: record.practiceName, value: cur.reply });
           } else {
-            // Outbound sent
             cur.sent   = earliest(cur.sent, eml.date) || "Yes";
             cur.sentBy = eml.fromEmails.find(e => GEORGE_ADDRS.has(e)) || currentUserEmail;
+            emailRec.type = "sent";
             log.push({ file: file.name, status: "sent", practice: record.practiceName, value: cur.sent });
+          }
+
+          if (emailRec.type) {
+            const isDup = cur.emails.some(e => e.subject === emailRec.subject && e.date === emailRec.date && e.type === emailRec.type);
+            if (!isDup) cur.emails.push(emailRec);
           }
         }
       }
@@ -1052,7 +1065,9 @@
       for (let i = 0; i < updateEntries.length; i += BATCH_SIZE) {
         const batch = writeBatch(db);
         updateEntries.slice(i, i + BATCH_SIZE).forEach(([id, vals]) => {
-          batch.update(doc(db, "customers", id), { sent: vals.sent, reply: vals.reply });
+          const upd = { sent: vals.sent, reply: vals.reply };
+          if (vals.emails) upd.emails = vals.emails;
+          batch.update(doc(db, "customers", id), upd);
         });
         await batch.commit();
         updated += Math.min(BATCH_SIZE, updateEntries.length - i);
@@ -1550,12 +1565,149 @@
       if (sel) sel.value = sortField + "_" + sortDir;
     }
 
+    // -- Practice Timeline --------------------------
+    let timelinePracticeId = null;
+
+    function calcFollowUp(c) {
+      if ((c.contractStatus === "Signed" || c.contractStatus === "Completed") && c.dateOfSigning) {
+        const m = c.dateOfSigning.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (m) return { date: new Date(parseInt(m[3]) + 3, parseInt(m[2]) - 1, parseInt(m[1])), label: "Contract renewal due", type: "contract" };
+      }
+      if (c.sent && c.sent !== "No") {
+        const reply = (c.reply || "").trim();
+        const meaningful = reply && reply !== "No" && !reply.startsWith("Auto") && !reply.startsWith("Read") && reply !== "Bounced";
+        if (!meaningful) {
+          const m = c.sent.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+          if (m) return { date: new Date(new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1])).getTime() + 14 * 86400000), label: "Follow-up (no reply)", type: "followup" };
+        }
+      }
+      return null;
+    }
+
+    window.openTimeline = async (id) => {
+      timelinePracticeId = id;
+      const snap = await getDoc(doc(db, "customers", id));
+      if (!snap.exists()) return;
+      renderTimeline({ id, ...snap.data() });
+      document.getElementById("timeline-modal").classList.remove("hidden");
+    };
+
+    window.closeTimeline = () => {
+      document.getElementById("timeline-modal").classList.add("hidden");
+      timelinePracticeId = null;
+    };
+
+    function renderTimeline(c) {
+      document.getElementById("tl-name").textContent = c.practiceName || "Unknown Practice";
+      document.getElementById("tl-meta").textContent = [c.area, c.postCode, c.phone, c.emailCont].filter(Boolean).join(" · ");
+      document.getElementById("tl-edit-btn").onclick = () => { closeTimeline(); openEdit(c.id); };
+
+      const fu   = calcFollowUp(c);
+      const fuEl = document.getElementById("tl-followup");
+      if (fu) {
+        const diffDays = Math.round((fu.date - new Date()) / 86400000);
+        const isOver   = diffDays < 0;
+        const diffStr  = isOver ? `${Math.abs(diffDays)} day${Math.abs(diffDays) !== 1 ? "s" : ""} overdue`
+                       : diffDays === 0 ? "today" : `in ${diffDays} day${diffDays !== 1 ? "s" : ""}`;
+        fuEl.style.display    = "block";
+        fuEl.style.background = isOver ? "rgba(248,81,73,.1)"              : "rgba(30,122,255,.1)";
+        fuEl.style.color      = isOver ? "var(--danger)"                   : "var(--accent)";
+        fuEl.style.border     = isOver ? "1px solid rgba(248,81,73,.3)"    : "1px solid rgba(30,122,255,.3)";
+        fuEl.innerHTML = `<strong>${fu.label}</strong> — ${fu.date.toLocaleDateString("en-GB")} <span style="opacity:.75">(${diffStr})</span>`;
+      } else {
+        fuEl.style.display = "none";
+      }
+
+      const events = [];
+      if (c.createdAt) {
+        const d = c.createdAt.toDate ? c.createdAt.toDate() : new Date(c.createdAt);
+        events.push({ date: d, type: "created", label: "Added to CRM" });
+      }
+
+      const storedEmails = c.emails || [];
+      const hasStoredType = t => storedEmails.some(e => e.type === t);
+
+      if (c.sent && c.sent !== "No" && !hasStoredType("sent")) {
+        const m = c.sent.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (m) events.push({ date: new Date(parseInt(m[3]), parseInt(m[2])-1, parseInt(m[1])), type: "sent", label: "Email sent", detail: c.sent });
+      }
+      if (c.reply && c.reply !== "No" && !hasStoredType("reply") && !hasStoredType("auto") && !hasStoredType("read") && !hasStoredType("bounce")) {
+        const r    = c.reply;
+        const type = r === "Bounced" ? "bounce" : r.startsWith("Auto") ? "auto" : r.startsWith("Read") ? "read" : "reply";
+        const ds   = r.replace(/^(Auto-reply |Read )/, "");
+        const m    = ds.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        events.push({ date: m ? new Date(parseInt(m[3]), parseInt(m[2])-1, parseInt(m[1])) : new Date(), type, label: { reply:"Reply received", auto:"Auto-reply received", read:"Read receipt", bounce:"Bounced" }[type], detail: r });
+      }
+
+      storedEmails.forEach(e => {
+        const m = (e.date||"").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        events.push({
+          date: m ? new Date(parseInt(m[3]), parseInt(m[2])-1, parseInt(m[1])) : new Date(),
+          type: e.type,
+          label: { sent:"Email sent", reply:"Reply received", auto:"Auto-reply received", read:"Read receipt", bounce:"Bounced" }[e.type] || e.type,
+          detail: e.subject || "", from: e.from || "", to: e.to || ""
+        });
+      });
+
+      (c.notes || []).forEach(n => {
+        events.push({ date: n.timestamp ? new Date(n.timestamp) : new Date(), type: "note", label: "Note", detail: n.text, author: n.author });
+      });
+
+      if (c.dateOfSigning) {
+        const m = c.dateOfSigning.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (m) events.push({ date: new Date(parseInt(m[3]), parseInt(m[2])-1, parseInt(m[1])), type: "signed", label: "Contract signed", detail: c.contractStatus });
+      }
+
+      events.sort((a, b) => (a.date || 0) - (b.date || 0));
+
+      const iconMap  = { created:"○", sent:"✉", reply:"←", auto:"~", read:"@", bounce:"✗", note:"✎", signed:"✓" };
+      const colorMap = { created:"var(--muted)", sent:"var(--accent)", reply:"var(--accent2)", auto:"var(--muted)", read:"var(--muted)", bounce:"var(--danger)", note:"var(--warn)", signed:"var(--accent2)" };
+
+      document.getElementById("tl-events").innerHTML = events.length
+        ? events.map(ev => `
+          <div style="display:flex;gap:14px;padding:10px 0;border-bottom:1px solid var(--border)">
+            <div style="width:24px;text-align:center;color:${colorMap[ev.type]||"var(--muted)"};font-size:15px;flex-shrink:0;padding-top:1px">${iconMap[ev.type]||"·"}</div>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:2px;flex-wrap:wrap">
+                <span style="font-weight:600;font-size:12px;color:${colorMap[ev.type]||"var(--text)"}">${ev.label}</span>
+                ${ev.date ? `<span style="font-size:11px;color:var(--muted)">${ev.date.toLocaleDateString("en-GB")}</span>` : ""}
+                ${ev.author ? `<span style="font-size:10px;color:var(--muted)">${esc(ev.author)}</span>` : ""}
+              </div>
+              ${ev.detail ? `<div style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(ev.detail)}">${esc(ev.detail)}</div>` : ""}
+              ${ev.from ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">From: ${esc(ev.from)}${ev.to ? " → " + esc(ev.to) : ""}</div>` : ""}
+            </div>
+          </div>`).join("")
+        : `<div style="color:var(--muted);font-size:12px;text-align:center;padding:32px">No history yet.</div>`;
+
+      document.getElementById("tl-note-input").value = "";
+    }
+
+    window.addNote = async () => {
+      const text = (document.getElementById("tl-note-input").value || "").trim();
+      if (!text || !timelinePracticeId) return;
+      const btn  = document.getElementById("tl-add-note-btn");
+      btn.disabled = true; btn.textContent = "Saving…";
+      try {
+        const ref  = doc(db, "customers", timelinePracticeId);
+        const snap = await getDoc(ref);
+        if (!snap.exists()) return;
+        const notes = [...(snap.data().notes || []), { text, author: currentUserEmail, timestamp: new Date().toISOString() }];
+        await updateDoc(ref, { notes });
+        renderTimeline({ id: timelinePracticeId, ...snap.data(), notes });
+      } finally {
+        btn.disabled = false; btn.textContent = "Add Note";
+      }
+    };
+
     window.addEventListener("DOMContentLoaded", () => {
       document.getElementById("modal").addEventListener("click", e => {
         if (e.target.id === "modal") closeModal();
       });
       document.getElementById("sample-modal").addEventListener("click", e => {
         if (e.target.id === "sample-modal") closeSampleModal();
+      });
+      document.getElementById("timeline-modal").addEventListener("click", e => {
+        if (e.target.id === "timeline-modal") closeTimeline();
       });
     });
 
@@ -2050,6 +2202,34 @@
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" id="save-btn" onclick="saveCustomer()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Timeline / Contact History Modal -->
+<div id="timeline-modal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)">
+  <div class="modal-card" style="width:700px;max-height:88vh;display:flex;flex-direction:column;padding:28px 28px 24px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-shrink:0">
+      <div>
+        <h2 id="tl-name" style="margin-bottom:4px;font-family:'Syne',sans-serif;font-size:20px"></h2>
+        <div id="tl-meta" style="color:var(--muted);font-size:12px"></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0;margin-left:16px">
+        <button class="btn btn-secondary" id="tl-edit-btn" style="font-size:11px;padding:6px 14px">Edit</button>
+        <button class="btn btn-ghost" onclick="closeTimeline()" style="font-size:14px;padding:6px 10px">✕</button>
+      </div>
+    </div>
+
+    <div id="tl-followup" style="display:none;padding:10px 14px;border-radius:var(--radius);font-size:12px;margin-bottom:14px;flex-shrink:0"></div>
+
+    <div style="flex:1;overflow-y:auto;min-height:0;padding-right:2px;margin-bottom:16px">
+      <div id="tl-events"></div>
+    </div>
+
+    <div style="border-top:1px solid var(--border);padding-top:16px;flex-shrink:0">
+      <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:6px">Add Note</label>
+      <textarea id="tl-note-input" placeholder="Type a note…" style="width:100%;padding:9px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:inherit;font-size:13px;outline:none;resize:vertical;min-height:60px;transition:border-color .2s" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'"></textarea>
+      <button class="btn btn-primary" id="tl-add-note-btn" style="margin-top:8px;font-size:12px" onclick="addNote()">Add Note</button>
     </div>
   </div>
 </div>
