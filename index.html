@@ -1603,11 +1603,13 @@
           return;
         }
 
-        // Fisher-Yates shuffle then take N
-        for (let i = pool.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [pool[i], pool[j]] = [pool[j], pool[i]];
-        }
+        // Score each practice by number of filled fields, pick most complete first
+        const scoreFields = ["area","practiceName","doctorName","organisationCode",
+          "postCode","addressLine1","icb","phone","practiceManager","emailCont","spid","group"];
+        pool.sort((a, b) => {
+          const score = c => scoreFields.filter(f => (c[f] || "").trim() !== "").length;
+          return score(b) - score(a);
+        });
         const sample = pool.slice(0, count);
 
         // Build ODS
