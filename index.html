@@ -1588,18 +1588,14 @@
         const snap = await getDocs(collection(db, "customers"));
         let pool = snap.docs.map(d => d.data());
 
-        // Only uncontacted practices with an email address
-        pool = pool.filter(c => {
-          const unsent   = !c.sent || c.sent === "No" || c.sent.trim() === "";
-          const hasEmail = (c.emailCont || "").trim() !== "";
-          return unsent && hasEmail;
-        });
+        // Only uncontacted practices
+        pool = pool.filter(c => !c.sent || c.sent === "No" || c.sent.trim() === "");
 
         if (area) pool = pool.filter(c => c.area === area);
 
         if (!pool.length) {
           statusEl.className   = "import-status error";
-          statusEl.textContent = "No uncontacted practices with email addresses found" + (area ? " in that area." : ".");
+          statusEl.textContent = "No uncontacted practices found" + (area ? " in that area." : ".");
           return;
         }
 
@@ -2063,7 +2059,7 @@
   <div class="modal-card" style="width:480px">
     <h2>Sample Batch Export</h2>
     <p style="color:var(--muted);font-size:12px;margin-bottom:20px;line-height:1.6">
-      Picks a random selection of <strong style="color:var(--text)">uncontacted practices that have an email address</strong> and exports them as an ODS file — ready for you to collect more data and turn into outreach emails.
+      Picks the <strong style="color:var(--text)">most complete uncontacted practices</strong> and exports them as an ODS file — ready for you to collect any missing data and turn into outreach emails.
     </p>
     <div class="form-row">
       <div class="form-group">
