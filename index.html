@@ -46,10 +46,11 @@
         document.getElementById("auth-screen").classList.add("hidden");
         document.getElementById("app-screen").classList.remove("hidden");
         document.getElementById("user-email").textContent = user.email;
-        loadPage();
+        currentUserEmail = user.email.toLowerCase().trim();
         loadStats();
         loadAreaFilter();
         buildSubTabs();
+        switchTab('dashboard');
       } else {
         document.getElementById("auth-screen").classList.remove("hidden");
         document.getElementById("app-screen").classList.add("hidden");
@@ -205,12 +206,30 @@
       document.getElementById("area-filter").value  = "";
       const sentFilter = document.getElementById("sent-filter");
       if (sentFilter) sentFilter.value = "";
-      // Update main tab UI
+
+      // Update tab UI
       document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
       const el = document.getElementById("tab-" + tab);
       if (el) el.classList.add("active");
-      // Show/hide subtab bar
-      document.getElementById("subtab-bar").style.display = tab === "unsent" ? "flex" : "none";
+
+      // Show/hide panels
+      const isDash = tab === "dashboard";
+      document.getElementById("dashboard-panel").classList.toggle("hidden", !isDash);
+      document.getElementById("subtab-bar").style.display  = tab === "unsent" ? "flex" : "none";
+
+      // Hide toolbar and table when on dashboard
+      const mainEl = document.querySelector(".toolbar");
+      const tableEl = document.querySelector(".table-wrap");
+      const pagEl   = document.querySelector(".pagination");
+      if (mainEl)  mainEl.style.display  = isDash ? "none" : "flex";
+      if (tableEl) tableEl.style.display = isDash ? "none" : "block";
+      if (pagEl)   pagEl.style.display   = isDash ? "none" : "flex";
+
+      if (isDash) {
+        loadDashboard();
+        return;
+      }
+
       allDocIds = []; currentPage = 1;
       loadPage();
     };
@@ -317,7 +336,7 @@
         const replyClass = (c.reply && c.reply !== "No") ? "badge-completed" : "badge-prospect";
         return `<tr>
           <td title="${esc(c.area)}">${esc(c.area)}</td>
-          <td title="${esc(c.practiceName)}">${esc(c.practiceName)}</td>
+          <td title="${esc(c.practiceName)}" style="cursor:pointer" onclick="openTimeline('${c.id}')"><span style="color:var(--accent)">${esc(c.practiceName)}</span></td>
           <td title="${esc(c.doctorName)}">${esc(c.doctorName)}</td>
           <td title="${esc(c.organisationCode)}">${esc(c.organisationCode)}</td>
           <td title="${esc(c.postCode)}">${esc(c.postCode)}</td>
@@ -496,6 +515,233 @@
       return parts.some(p => stringSimilarity(p, newName) > 0.6);
     }
 
+
+
+    // ================================================================
+    // DASHBOARD
+    // ================================================================
+    let currentUserEmail = "";  // set on login
+    let dashPeriod   = 7;      // days; 0 = all time
+    let dashChart    = null;   // Chart.js instance
+    let weeklyChart  = null;   // weekly comparison chart
+    let dashAllData  = [];     // cached full dataset
+
+    window.setDashPeriod = (days) => {
+      dashPeriod = days;
+      document.querySelectorAll("[id^='dp-']").forEach(b => b.classList.remove("active"));
+      const btn = document.getElementById("dp-" + days);
+      if (btn) btn.classList.add("active");
+      renderDashboard(dashAllData);
+    };
+
+    function getWeekBounds(weekOffset) {
+      const now = new Date();
+      const day = now.getDay();
+      const mondayOffset = day === 0 ? -6 : 1 - day;
+      const monday = new Date(now);
+      monday.setDate(now.getDate() + mondayOffset + (weekOffset || 0) * 7);
+      monday.setHours(0, 0, 0, 0);
+      const sunday = new Date(monday);
+      sunday.setDate(monday.getDate() + 6);
+      sunday.setHours(23, 59, 59, 999);
+      return { monday, sunday };
+    }
+
+    async function loadDashboard() {
+      const snap   = await getDocs(collection(db, "customers"));
+      dashAllData  = snap.docs.map(d => d.data());
+      renderDashboard(dashAllData);
+    }
+
+    function parseDate(s) {
+      // Parse DD/MM/YYYY -> Date object
+      if (!s || s === "No") return null;
+      // Handle prefixed values like "Auto-reply 12/06/2024", "Read 12/06/2024"
+      const m = s.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+      if (m) return new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]));
+      return null;
+    }
+
+    function renderDashboard(all) {
+      const now      = new Date();
+      now.setHours(23, 59, 59, 999);
+      const today    = new Date(); today.setHours(0, 0, 0, 0);
+      const thisWeek = getWeekBounds(0);
+      const lastWeek = getWeekBounds(-1);
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+      // All records with a valid sent date
+      const sentAll = all.filter(c => {
+        if (!c.sent || c.sent === "No") return false;
+        return !!parseDate(c.sent);
+      });
+
+      // User-filtered sent records for productivity metrics
+      // Only include records explicitly attributed to the logged-in user
+      const sent = sentAll.filter(c => {
+        if (!currentUserEmail) return true;
+        return (c.sentBy || "").toLowerCase() === currentUserEmail;
+      });
+
+      // Productivity metrics
+      const todayCount    = sent.filter(c => { const d = parseDate(c.sent); return d && d >= today; }).length;
+      const thisWeekCount = sent.filter(c => { const d = parseDate(c.sent); return d && d >= thisWeek.monday && d <= thisWeek.sunday; }).length;
+      const lastWeekCount = sent.filter(c => { const d = parseDate(c.sent); return d && d >= lastWeek.monday && d <= lastWeek.sunday; }).length;
+      const monthCount    = sent.filter(c => { const d = parseDate(c.sent); return d && d >= monthStart; }).length;
+
+      const daysElapsed = Math.max(1, Math.min(7, Math.ceil((Date.now() - thisWeek.monday.getTime()) / 86400000)));
+      const avgWeek     = (thisWeekCount / daysElapsed).toFixed(1);
+
+      // Week-over-week change
+      let weekChangeText = "--", weekChangeColor = "var(--muted)";
+      if (lastWeekCount > 0) {
+        const pct = Math.round(((thisWeekCount - lastWeekCount) / lastWeekCount) * 100);
+        weekChangeText  = (pct >= 0 ? "+" : "") + pct + "%";
+        weekChangeColor = pct > 0 ? "var(--accent2)" : pct < 0 ? "var(--danger)" : "var(--muted)";
+      } else if (thisWeekCount > 0) {
+        weekChangeText = "New"; weekChangeColor = "var(--accent2)";
+      }
+
+      // Per-day breakdown Mon-Sun for this and last week
+      const dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+      const thisDays = Array(7).fill(0);
+      const lastDays = Array(7).fill(0);
+      sent.forEach(c => {
+        const d = parseDate(c.sent); if (!d) return;
+        if (d >= thisWeek.monday && d <= thisWeek.sunday) {
+          const idx = Math.round((d - thisWeek.monday) / 86400000);
+          if (idx >= 0 && idx < 7) thisDays[idx]++;
+        }
+        if (d >= lastWeek.monday && d <= lastWeek.sunday) {
+          const idx = Math.round((d - lastWeek.monday) / 86400000);
+          if (idx >= 0 && idx < 7) lastDays[idx]++;
+        }
+      });
+
+      const bestDayVal = Math.max(...thisDays);
+      const bestDayIdx = thisDays.indexOf(bestDayVal);
+      const bestDayStr = bestDayVal > 0 ? `${dayNames[bestDayIdx]} (${bestDayVal})` : "--";
+
+      // Reply metrics (all time)
+      const withReply = all.filter(c => { const r = (c.reply || "").trim(); return r && r !== "No"; });
+      const replyRate = sentAll.length > 0
+        ? ((withReply.length / sentAll.length) * 100).toFixed(1) + "%"
+        : "0.0%";
+
+      // Update DOM
+      document.getElementById("dash-today").textContent    = todayCount;
+      document.getElementById("dash-thisweek").textContent = thisWeekCount;
+      document.getElementById("dash-lastweek").textContent = lastWeekCount;
+      document.getElementById("dash-month").textContent    = monthCount;
+      document.getElementById("dash-bestday").textContent  = bestDayStr;
+      document.getElementById("dash-avgweek").textContent  = avgWeek;
+      document.getElementById("dash-replies").textContent  = withReply.length;
+      document.getElementById("dash-rate").textContent     = replyRate;
+
+      const wcEl = document.getElementById("dash-weekchange");
+      if (wcEl) { wcEl.textContent = weekChangeText; wcEl.style.color = weekChangeColor; }
+
+      const dlEl = document.getElementById("dash-date-label");
+      if (dlEl) dlEl.textContent =
+        `Week of ${thisWeek.monday.toLocaleDateString("en-GB")} – ${thisWeek.sunday.toLocaleDateString("en-GB")}`;
+
+      // Weekly comparison chart (Mon–Sun, this week vs last week)
+      const hasWeeklyData = thisDays.some(v => v > 0) || lastDays.some(v => v > 0);
+      const wChartEl = document.getElementById("weekly-chart");
+      const wEmptyEl = document.getElementById("weekly-chart-empty");
+      if (wEmptyEl) wEmptyEl.style.display = hasWeeklyData ? "none" : "block";
+      if (wChartEl) wChartEl.style.display  = hasWeeklyData ? "block" : "none";
+      if (hasWeeklyData && wChartEl) {
+        if (weeklyChart) weeklyChart.destroy();
+        weeklyChart = new Chart(wChartEl.getContext("2d"), {
+          type: "bar",
+          data: {
+            labels: dayNames,
+            datasets: [
+              { label: "This Week", data: thisDays, backgroundColor: "rgba(30,122,255,0.7)",    borderColor: "rgba(30,122,255,1)",    borderWidth: 1, borderRadius: 4 },
+              { label: "Last Week", data: lastDays, backgroundColor: "rgba(125,133,144,0.35)", borderColor: "rgba(125,133,144,0.6)", borderWidth: 1, borderRadius: 4 }
+            ]
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.raw} email${ctx.raw !== 1 ? "s" : ""}` } }
+            },
+            scales: {
+              x: { ticks: { color: "#7d8590", font: { family: "DM Mono, monospace", size: 11 } }, grid: { color: "#21282f" } },
+              y: { beginAtZero: true, ticks: { color: "#7d8590", font: { family: "DM Mono, monospace", size: 11 }, stepSize: 1 }, grid: { color: "#21282f" } }
+            }
+          }
+        });
+      }
+
+      // Extended period chart
+      const cutoff = dashPeriod > 0 ? new Date(now.getTime() - (dashPeriod - 1) * 86400000) : null;
+      if (cutoff) cutoff.setHours(0, 0, 0, 0);
+      const inPeriod = sentAll.filter(c => {
+        const d = parseDate(c.sent); if (!d) return false;
+        if (currentUserEmail && (c.sentBy || "").toLowerCase() !== currentUserEmail) return false;
+        return cutoff ? d >= cutoff : true;
+      });
+      const numDays = dashPeriod > 0 ? dashPeriod : (() => {
+        const dates = sentAll.map(c => parseDate(c.sent)).filter(Boolean);
+        if (!dates.length) return 1;
+        return Math.max(1, Math.ceil((Date.now() - Math.min(...dates.map(d => d.getTime()))) / 86400000));
+      })();
+      const extDayMap = {};
+      for (let i = Math.min(numDays, 90) - 1; i >= 0; i--) {
+        const d = new Date(now); d.setDate(d.getDate() - i);
+        extDayMap[d.toLocaleDateString("en-GB")] = 0;
+      }
+      (dashPeriod > 0 ? inPeriod : sentAll).forEach(c => {
+        const d = parseDate(c.sent); if (!d) return;
+        const key = d.toLocaleDateString("en-GB");
+        if (key in extDayMap) extDayMap[key]++;
+        else if (dashPeriod === 0) extDayMap[key] = (extDayMap[key] || 0) + 1;
+      });
+      const extLabels = Object.keys(extDayMap);
+      const extValues = Object.values(extDayMap);
+      const hasExtData = extValues.some(v => v > 0);
+      document.getElementById("chart-empty").style.display = hasExtData ? "none" : "block";
+      document.getElementById("sent-chart").style.display  = hasExtData ? "block" : "none";
+      if (hasExtData) {
+        if (dashChart) dashChart.destroy();
+        const ctx = document.getElementById("sent-chart").getContext("2d");
+        dashChart = new Chart(ctx, {
+          type: "bar",
+          data: { labels: extLabels, datasets: [{ label: "Emails Sent", data: extValues, backgroundColor: "rgba(30,122,255,0.7)", borderColor: "rgba(30,122,255,1)", borderWidth: 1, borderRadius: 4 }] },
+          options: {
+            responsive: true,
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: { title: ctx => ctx[0].label, label: ctx => ` ${ctx.raw} email${ctx.raw !== 1 ? "s" : ""} sent` } }
+            },
+            scales: {
+              x: { ticks: { color: "#7d8590", font: { family: "DM Mono, monospace", size: 10 }, maxRotation: 45, autoSkip: true, maxTicksLimit: dashPeriod === 0 ? 20 : dashPeriod }, grid: { color: "#21282f" } },
+              y: { beginAtZero: true, ticks: { color: "#7d8590", font: { family: "DM Mono, monospace", size: 10 }, stepSize: 1 }, grid: { color: "#21282f" } }
+            }
+          }
+        });
+      }
+
+      // Reply breakdown cards
+      const breakdown = { Real: 0, "Auto-reply": 0, "Read receipt": 0, Bounced: 0 };
+      all.forEach(c => {
+        const r = (c.reply || "").trim(); if (!r || r === "No") return;
+        if (r === "Bounced")           breakdown.Bounced++;
+        else if (r.startsWith("Auto")) breakdown["Auto-reply"]++;
+        else if (r.startsWith("Read")) breakdown["Read receipt"]++;
+        else                           breakdown.Real++;
+      });
+      const colours = { Real: "var(--accent2)", "Auto-reply": "var(--muted)", "Read receipt": "var(--warn)", Bounced: "var(--danger)" };
+      document.getElementById("reply-breakdown").innerHTML = Object.entries(breakdown).map(([k, v]) =>
+        `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em">${k}</div>
+          <div style="font-family:Syne,sans-serif;font-size:26px;font-weight:700;color:${colours[k]}">${v}</div>
+        </div>`
+      ).join("");
+    }
 
     // ================================================================
     // EML PROCESSING -- ported from eml_to_spreadsheet.py
@@ -765,23 +1011,30 @@
 
         matched++;
         for (const record of hits) {
-          if (!updateMap[record.id]) updateMap[record.id] = { sent: record.sent||"", reply: record.reply||"" };
-          const cur = updateMap[record.id];
+          if (!updateMap[record.id]) updateMap[record.id] = {
+            sent: record.sent || "", reply: record.reply || "",
+            emails: [...(record.emails || [])]
+          };
+          const cur      = updateMap[record.id];
+          const emailRec = { date: eml.date || "", subject: eml.subject || "", from: eml.fromEmails.join(", "), to: eml.toEmails.join(", "), type: "" };
 
           if (eml.is_bounce) {
             cur.reply = "Bounced";
+            emailRec.type = "bounce";
             log.push({ file: file.name, status: "bounce", practice: record.practiceName, value: "Bounced" });
           } else if (eml.is_read_receipt) {
             if (!cur.reply || cur.reply.startsWith("Read ")) {
               const d = earliest(cur.reply.replace("Read ",""), eml.date);
               cur.reply = `Read ${d}`;
             }
+            emailRec.type = "read";
             log.push({ file: file.name, status: "read", practice: record.practiceName, value: cur.reply });
           } else if (eml.is_auto_reply) {
             if (!cur.reply || cur.reply.startsWith("Auto-reply ")) {
               const d = earliest(cur.reply.replace("Auto-reply ",""), eml.date);
               cur.reply = `Auto-reply ${d}`;
             }
+            emailRec.type = "auto";
             log.push({ file: file.name, status: "auto", practice: record.practiceName, value: cur.reply });
           } else if (eml.is_reply || (toGeorge && !fromGeorge)) {
             if (!cur.reply || cur.reply.startsWith("Auto-reply ") || cur.reply.startsWith("Read ")) {
@@ -789,11 +1042,18 @@
             } else {
               cur.reply = earliest(cur.reply, eml.date) || "Yes";
             }
+            emailRec.type = "reply";
             log.push({ file: file.name, status: "reply", practice: record.practiceName, value: cur.reply });
           } else {
-            // Outbound sent
-            cur.sent = earliest(cur.sent, eml.date) || "Yes";
+            cur.sent   = earliest(cur.sent, eml.date) || "Yes";
+            cur.sentBy = eml.fromEmails.find(e => GEORGE_ADDRS.has(e)) || currentUserEmail;
+            emailRec.type = "sent";
             log.push({ file: file.name, status: "sent", practice: record.practiceName, value: cur.sent });
+          }
+
+          if (emailRec.type) {
+            const isDup = cur.emails.some(e => e.subject === emailRec.subject && e.date === emailRec.date && e.type === emailRec.type);
+            if (!isDup) cur.emails.push(emailRec);
           }
         }
       }
@@ -805,7 +1065,9 @@
       for (let i = 0; i < updateEntries.length; i += BATCH_SIZE) {
         const batch = writeBatch(db);
         updateEntries.slice(i, i + BATCH_SIZE).forEach(([id, vals]) => {
-          batch.update(doc(db, "customers", id), { sent: vals.sent, reply: vals.reply });
+          const upd = { sent: vals.sent, reply: vals.reply };
+          if (vals.emails) upd.emails = vals.emails;
+          batch.update(doc(db, "customers", id), upd);
         });
         await batch.commit();
         updated += Math.min(BATCH_SIZE, updateEntries.length - i);
@@ -972,6 +1234,8 @@
           if (norm.reply && norm.reply !== "No" && (!norm.sent || norm.sent === "No" || norm.sent.trim() === "")) {
             norm.sent = norm.reply;
           }
+          // Tag with the logged-in user who imported this
+          if (norm.sent) norm.sentBy = currentUserEmail;
           if (norm.dateOfSigning) norm.dateOfSigning = excelDateToString(norm.dateOfSigning);
           norm.sourceFormat = format;
           norm.importedAt   = new Date().toISOString();
@@ -1053,6 +1317,8 @@
         loadStats();
         loadAreaFilter();
         buildSubTabs();
+        // Pre-load dashboard data in background
+        loadDashboard();
         buildSubTabs();
       } catch (err) {
         statusEl.textContent = "Import failed: " + err.message;
@@ -1299,14 +1565,236 @@
       if (sel) sel.value = sortField + "_" + sortDir;
     }
 
+    // -- Practice Timeline --------------------------
+    let timelinePracticeId = null;
+
+    function calcFollowUp(c) {
+      if ((c.contractStatus === "Signed" || c.contractStatus === "Completed") && c.dateOfSigning) {
+        const m = c.dateOfSigning.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (m) return { date: new Date(parseInt(m[3]) + 3, parseInt(m[2]) - 1, parseInt(m[1])), label: "Contract renewal due", type: "contract" };
+      }
+      if (c.sent && c.sent !== "No") {
+        const reply = (c.reply || "").trim();
+        const meaningful = reply && reply !== "No" && !reply.startsWith("Auto") && !reply.startsWith("Read") && reply !== "Bounced";
+        if (!meaningful) {
+          const m = c.sent.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+          if (m) return { date: new Date(new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1])).getTime() + 14 * 86400000), label: "Follow-up (no reply)", type: "followup" };
+        }
+      }
+      return null;
+    }
+
+    window.openTimeline = async (id) => {
+      timelinePracticeId = id;
+      const snap = await getDoc(doc(db, "customers", id));
+      if (!snap.exists()) return;
+      renderTimeline({ id, ...snap.data() });
+      document.getElementById("timeline-modal").classList.remove("hidden");
+    };
+
+    window.closeTimeline = () => {
+      document.getElementById("timeline-modal").classList.add("hidden");
+      timelinePracticeId = null;
+    };
+
+    function renderTimeline(c) {
+      document.getElementById("tl-name").textContent = c.practiceName || "Unknown Practice";
+      document.getElementById("tl-meta").textContent = [c.area, c.postCode, c.phone, c.emailCont].filter(Boolean).join(" · ");
+      document.getElementById("tl-edit-btn").onclick = () => { closeTimeline(); openEdit(c.id); };
+
+      const fu   = calcFollowUp(c);
+      const fuEl = document.getElementById("tl-followup");
+      if (fu) {
+        const diffDays = Math.round((fu.date - new Date()) / 86400000);
+        const isOver   = diffDays < 0;
+        const diffStr  = isOver ? `${Math.abs(diffDays)} day${Math.abs(diffDays) !== 1 ? "s" : ""} overdue`
+                       : diffDays === 0 ? "today" : `in ${diffDays} day${diffDays !== 1 ? "s" : ""}`;
+        fuEl.style.display    = "block";
+        fuEl.style.background = isOver ? "rgba(248,81,73,.1)"              : "rgba(30,122,255,.1)";
+        fuEl.style.color      = isOver ? "var(--danger)"                   : "var(--accent)";
+        fuEl.style.border     = isOver ? "1px solid rgba(248,81,73,.3)"    : "1px solid rgba(30,122,255,.3)";
+        fuEl.innerHTML = `<strong>${fu.label}</strong> — ${fu.date.toLocaleDateString("en-GB")} <span style="opacity:.75">(${diffStr})</span>`;
+      } else {
+        fuEl.style.display = "none";
+      }
+
+      const events = [];
+      if (c.createdAt) {
+        const d = c.createdAt.toDate ? c.createdAt.toDate() : new Date(c.createdAt);
+        events.push({ date: d, type: "created", label: "Added to CRM" });
+      }
+
+      const storedEmails = c.emails || [];
+      const hasStoredType = t => storedEmails.some(e => e.type === t);
+
+      if (c.sent && c.sent !== "No" && !hasStoredType("sent")) {
+        const m = c.sent.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (m) events.push({ date: new Date(parseInt(m[3]), parseInt(m[2])-1, parseInt(m[1])), type: "sent", label: "Email sent", detail: c.sent });
+      }
+      if (c.reply && c.reply !== "No" && !hasStoredType("reply") && !hasStoredType("auto") && !hasStoredType("read") && !hasStoredType("bounce")) {
+        const r    = c.reply;
+        const type = r === "Bounced" ? "bounce" : r.startsWith("Auto") ? "auto" : r.startsWith("Read") ? "read" : "reply";
+        const ds   = r.replace(/^(Auto-reply |Read )/, "");
+        const m    = ds.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        events.push({ date: m ? new Date(parseInt(m[3]), parseInt(m[2])-1, parseInt(m[1])) : new Date(), type, label: { reply:"Reply received", auto:"Auto-reply received", read:"Read receipt", bounce:"Bounced" }[type], detail: r });
+      }
+
+      storedEmails.forEach(e => {
+        const m = (e.date||"").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        events.push({
+          date: m ? new Date(parseInt(m[3]), parseInt(m[2])-1, parseInt(m[1])) : new Date(),
+          type: e.type,
+          label: { sent:"Email sent", reply:"Reply received", auto:"Auto-reply received", read:"Read receipt", bounce:"Bounced" }[e.type] || e.type,
+          detail: e.subject || "", from: e.from || "", to: e.to || ""
+        });
+      });
+
+      (c.notes || []).forEach(n => {
+        events.push({ date: n.timestamp ? new Date(n.timestamp) : new Date(), type: "note", label: "Note", detail: n.text, author: n.author });
+      });
+
+      if (c.dateOfSigning) {
+        const m = c.dateOfSigning.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (m) events.push({ date: new Date(parseInt(m[3]), parseInt(m[2])-1, parseInt(m[1])), type: "signed", label: "Contract signed", detail: c.contractStatus });
+      }
+
+      events.sort((a, b) => (a.date || 0) - (b.date || 0));
+
+      const iconMap  = { created:"○", sent:"✉", reply:"←", auto:"~", read:"@", bounce:"✗", note:"✎", signed:"✓" };
+      const colorMap = { created:"var(--muted)", sent:"var(--accent)", reply:"var(--accent2)", auto:"var(--muted)", read:"var(--muted)", bounce:"var(--danger)", note:"var(--warn)", signed:"var(--accent2)" };
+
+      document.getElementById("tl-events").innerHTML = events.length
+        ? events.map(ev => `
+          <div style="display:flex;gap:14px;padding:10px 0;border-bottom:1px solid var(--border)">
+            <div style="width:24px;text-align:center;color:${colorMap[ev.type]||"var(--muted)"};font-size:15px;flex-shrink:0;padding-top:1px">${iconMap[ev.type]||"·"}</div>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:2px;flex-wrap:wrap">
+                <span style="font-weight:600;font-size:12px;color:${colorMap[ev.type]||"var(--text)"}">${ev.label}</span>
+                ${ev.date ? `<span style="font-size:11px;color:var(--muted)">${ev.date.toLocaleDateString("en-GB")}</span>` : ""}
+                ${ev.author ? `<span style="font-size:10px;color:var(--muted)">${esc(ev.author)}</span>` : ""}
+              </div>
+              ${ev.detail ? `<div style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(ev.detail)}">${esc(ev.detail)}</div>` : ""}
+              ${ev.from ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">From: ${esc(ev.from)}${ev.to ? " → " + esc(ev.to) : ""}</div>` : ""}
+            </div>
+          </div>`).join("")
+        : `<div style="color:var(--muted);font-size:12px;text-align:center;padding:32px">No history yet.</div>`;
+
+      document.getElementById("tl-note-input").value = "";
+    }
+
+    window.addNote = async () => {
+      const text = (document.getElementById("tl-note-input").value || "").trim();
+      if (!text || !timelinePracticeId) return;
+      const btn  = document.getElementById("tl-add-note-btn");
+      btn.disabled = true; btn.textContent = "Saving…";
+      try {
+        const ref  = doc(db, "customers", timelinePracticeId);
+        const snap = await getDoc(ref);
+        if (!snap.exists()) return;
+        const notes = [...(snap.data().notes || []), { text, author: currentUserEmail, timestamp: new Date().toISOString() }];
+        await updateDoc(ref, { notes });
+        renderTimeline({ id: timelinePracticeId, ...snap.data(), notes });
+      } finally {
+        btn.disabled = false; btn.textContent = "Add Note";
+      }
+    };
+
     window.addEventListener("DOMContentLoaded", () => {
       document.getElementById("modal").addEventListener("click", e => {
         if (e.target.id === "modal") closeModal();
       });
+      document.getElementById("sample-modal").addEventListener("click", e => {
+        if (e.target.id === "sample-modal") closeSampleModal();
+      });
+      document.getElementById("timeline-modal").addEventListener("click", e => {
+        if (e.target.id === "timeline-modal") closeTimeline();
+      });
     });
+
+    // -- Sample Batch Export -----------------------
+    window.openSampleModal = async () => {
+      document.getElementById("sample-status").textContent = "";
+      document.getElementById("sample-status").className  = "";
+      document.getElementById("sample-modal").classList.remove("hidden");
+      // Clone areas from the existing area filter
+      const src  = document.getElementById("area-filter");
+      const dest = document.getElementById("sample-area");
+      dest.innerHTML = '<option value="">Any area</option>' +
+        [...src.options].slice(1).map(o => `<option value="${esc(o.value)}">${esc(o.text)}</option>`).join("");
+    };
+
+    window.closeSampleModal = () => {
+      document.getElementById("sample-modal").classList.add("hidden");
+    };
+
+    window.exportSample = async () => {
+      const count    = parseInt(document.getElementById("sample-count").value);
+      const area     = document.getElementById("sample-area").value;
+      const statusEl = document.getElementById("sample-status");
+      statusEl.className   = "import-status info";
+      statusEl.textContent = "Loading practices...";
+
+      try {
+        if (!window.XLSX) throw new Error("XLSX library not loaded yet — try again in a moment.");
+
+        const snap = await getDocs(collection(db, "customers"));
+        let pool = snap.docs.map(d => d.data());
+
+        // Only uncontacted practices
+        pool = pool.filter(c => !c.sent || c.sent === "No" || c.sent.trim() === "");
+
+        if (area) pool = pool.filter(c => c.area === area);
+
+        if (!pool.length) {
+          statusEl.className   = "import-status error";
+          statusEl.textContent = "No uncontacted practices found" + (area ? " in that area." : ".");
+          return;
+        }
+
+        // Score each practice by number of filled fields, pick most complete first
+        const scoreFields = ["area","practiceName","doctorName","organisationCode",
+          "postCode","addressLine1","icb","phone","practiceManager","emailCont","spid","group"];
+        pool.sort((a, b) => {
+          const score = c => scoreFields.filter(f => (c[f] || "").trim() !== "").length;
+          return score(b) - score(a);
+        });
+        const sample = pool.slice(0, count);
+
+        // Build ODS
+        const headers = [
+          "Area", "Practice Name", "Doctor Name", "Organisation Code",
+          "Post Code", "Address Line 1", "ICB", "Phone",
+          "Practice Manager", "Email Contact", "SPID", "Group"
+        ];
+        const rows = sample.map(c => [
+          c.area, c.practiceName, c.doctorName, c.organisationCode,
+          c.postCode, c.addressLine1, c.icb, c.phone,
+          c.practiceManager, c.emailCont, c.spid, c.group
+        ].map(v => v || ""));
+
+        const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+        ws["!cols"] = [12,32,24,16,10,30,25,16,22,32,16,16].map(w => ({ wch: w }));
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Sample Batch");
+
+        const buf  = XLSX.write(wb, { bookType: "ods", type: "array" });
+        const blob = new Blob([buf], { type: "application/vnd.oasis.opendocument.spreadsheet" });
+        const a    = document.createElement("a");
+        a.href     = URL.createObjectURL(blob);
+        a.download = `urwater-sample-${count}-${new Date().toISOString().slice(0,10)}.ods`;
+        a.click();
+
+        statusEl.className   = "import-status success";
+        statusEl.textContent = `Exported ${sample.length} practice${sample.length !== 1 ? "s" : ""} — ${pool.length} uncontacted available${area ? " in " + area : ""}.`;
+      } catch (err) {
+        statusEl.className   = "import-status error";
+        statusEl.textContent = "Export failed: " + err.message;
+      }
+    };
   </script>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
@@ -1487,7 +1975,8 @@
 
     <!-- Main tabs -->
     <div class="tab-bar">
-      <button class="tab-btn active" id="tab-all"    onclick="switchTab('all')">All Practices</button>
+      <button class="tab-btn active" id="tab-dashboard" onclick="switchTab('dashboard')">Dashboard</button>
+      <button class="tab-btn" id="tab-all"    onclick="switchTab('all')">All Practices</button>
       <button class="tab-btn"        id="tab-sent"   onclick="switchTab('sent')">✉ Sent</button>
       <button class="tab-btn"        id="tab-unsent" onclick="switchTab('unsent')">✗ Unsent</button>
       <div style="flex:1"></div>
@@ -1497,6 +1986,93 @@
     <!-- Unsent subtabs (shown only when Unsent tab active) -->
     <div class="subtab-bar" id="subtab-bar" style="display:none">
       <button class="subtab-btn active" id="subtab-" onclick="switchSubTab('')">All Unsent</button>
+    </div>
+
+    <!-- Dashboard Panel -->
+    <div id="dashboard-panel" class="hidden">
+
+      <!-- Dashboard header -->
+      <div style="margin-bottom:24px">
+        <div style="font-family:'Syne',sans-serif;font-size:22px;font-weight:800;margin-bottom:4px">Productivity Dashboard</div>
+        <div style="color:var(--muted);font-size:12px" id="dash-date-label"></div>
+      </div>
+
+      <!-- Primary productivity metrics -->
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px">
+        <div class="stat-card" style="border-left:3px solid var(--accent)">
+          <div class="stat-label">Sent Today</div>
+          <div class="stat-value blue" id="dash-today">--</div>
+        </div>
+        <div class="stat-card" style="border-left:3px solid var(--accent2)">
+          <div class="stat-label">This Week</div>
+          <div class="stat-value green" id="dash-thisweek">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Last Week</div>
+          <div class="stat-value muted" id="dash-lastweek">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">vs Last Week</div>
+          <div class="stat-value" id="dash-weekchange" style="font-family:'Syne',sans-serif;font-size:28px;font-weight:700">--</div>
+        </div>
+        <div class="stat-card" style="border-left:3px solid var(--warn)">
+          <div class="stat-label">This Month</div>
+          <div class="stat-value warn" id="dash-month">--</div>
+        </div>
+      </div>
+
+      <!-- Secondary metrics -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+        <div class="stat-card">
+          <div class="stat-label">Best Day This Week</div>
+          <div class="stat-value blue" id="dash-bestday" style="font-size:16px;font-family:'DM Mono',monospace;padding-top:4px">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Avg / Day (This Week)</div>
+          <div class="stat-value green" id="dash-avgweek">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Replies Received</div>
+          <div class="stat-value warn" id="dash-replies">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Reply Rate</div>
+          <div class="stat-value muted" id="dash-rate">--</div>
+        </div>
+      </div>
+
+      <!-- Weekly comparison chart -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+          <div style="font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.08em;text-transform:uppercase">This Week vs Last Week</div>
+          <div style="display:flex;gap:14px;font-size:11px;color:var(--muted)">
+            <span><span style="display:inline-block;width:10px;height:10px;background:rgba(30,122,255,0.7);border-radius:2px;margin-right:5px;vertical-align:middle"></span>This week</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:rgba(125,133,144,0.4);border-radius:2px;margin-right:5px;vertical-align:middle"></span>Last week</span>
+          </div>
+        </div>
+        <canvas id="weekly-chart" height="80"></canvas>
+        <div id="weekly-chart-empty" style="display:none;text-align:center;color:var(--muted);padding:40px;font-size:12px">No sent data this week</div>
+      </div>
+
+      <!-- Extended period selector + chart -->
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+        <span style="font-size:10px;color:var(--muted);font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-right:4px">Extended view</span>
+        <button class="subtab-btn active" id="dp-7"  onclick="setDashPeriod(7)">Last 7 days</button>
+        <button class="subtab-btn"        id="dp-30" onclick="setDashPeriod(30)">Last 30 days</button>
+        <button class="subtab-btn"        id="dp-0"  onclick="setDashPeriod(0)">All time</button>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:14px;font-weight:600;letter-spacing:.08em;text-transform:uppercase">Emails Sent Per Day</div>
+        <canvas id="sent-chart" height="80"></canvas>
+        <div id="chart-empty" style="display:none;text-align:center;color:var(--muted);padding:40px;font-size:12px">No sent data in this period</div>
+      </div>
+
+      <!-- Reply breakdown -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:14px;font-weight:600;letter-spacing:.08em;text-transform:uppercase">Reply Breakdown (All Time)</div>
+        <div id="reply-breakdown" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px"></div>
+      </div>
+
     </div>
 
     <div class="toolbar">
@@ -1513,6 +2089,7 @@
       <div class="toolbar-spacer"></div>
       <button class="btn btn-secondary" onclick="triggerImport()">⬆ Import</button>
       <button class="btn btn-secondary" onclick="triggerEmlUpload()" title="Upload .eml email files to auto-update Sent/Reply">✉ EML Upload</button>
+      <button class="btn btn-secondary" onclick="openSampleModal()" title="Export a random batch of uncontacted practices as ODS">⚡ Sample Batch</button>
       <button class="btn btn-primary" onclick="openAdd()">+ Add Practice</button>
     </div>
 
@@ -1625,6 +2202,66 @@
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" id="save-btn" onclick="saveCustomer()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Timeline / Contact History Modal -->
+<div id="timeline-modal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)">
+  <div class="modal-card" style="width:700px;max-height:88vh;display:flex;flex-direction:column;padding:28px 28px 24px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-shrink:0">
+      <div>
+        <h2 id="tl-name" style="margin-bottom:4px;font-family:'Syne',sans-serif;font-size:20px"></h2>
+        <div id="tl-meta" style="color:var(--muted);font-size:12px"></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0;margin-left:16px">
+        <button class="btn btn-secondary" id="tl-edit-btn" style="font-size:11px;padding:6px 14px">Edit</button>
+        <button class="btn btn-ghost" onclick="closeTimeline()" style="font-size:14px;padding:6px 10px">✕</button>
+      </div>
+    </div>
+
+    <div id="tl-followup" style="display:none;padding:10px 14px;border-radius:var(--radius);font-size:12px;margin-bottom:14px;flex-shrink:0"></div>
+
+    <div style="flex:1;overflow-y:auto;min-height:0;padding-right:2px;margin-bottom:16px">
+      <div id="tl-events"></div>
+    </div>
+
+    <div style="border-top:1px solid var(--border);padding-top:16px;flex-shrink:0">
+      <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:6px">Add Note</label>
+      <textarea id="tl-note-input" placeholder="Type a note…" style="width:100%;padding:9px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:inherit;font-size:13px;outline:none;resize:vertical;min-height:60px;transition:border-color .2s" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'"></textarea>
+      <button class="btn btn-primary" id="tl-add-note-btn" style="margin-top:8px;font-size:12px" onclick="addNote()">Add Note</button>
+    </div>
+  </div>
+</div>
+
+<!-- Sample Batch Modal -->
+<div id="sample-modal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)">
+  <div class="modal-card" style="width:480px">
+    <h2>Sample Batch Export</h2>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:20px;line-height:1.6">
+      Picks the <strong style="color:var(--text)">most complete uncontacted practices</strong> and exports them as an ODS file — ready for you to collect any missing data and turn into outreach emails.
+    </p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Batch Size</label>
+        <select id="sample-count">
+          <option value="5">5 practices</option>
+          <option value="10" selected>10 practices</option>
+          <option value="20">20 practices</option>
+          <option value="30">30 practices</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Limit to Area (optional)</label>
+        <select id="sample-area">
+          <option value="">Any area</option>
+        </select>
+      </div>
+    </div>
+    <div id="sample-status" style="margin-top:4px"></div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeSampleModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="exportSample()">⬇ Export ODS</button>
     </div>
   </div>
 </div>
