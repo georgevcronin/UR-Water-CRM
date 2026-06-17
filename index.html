@@ -46,10 +46,13 @@
         document.getElementById("auth-screen").classList.add("hidden");
         document.getElementById("app-screen").classList.remove("hidden");
         document.getElementById("user-email").textContent = user.email;
+        currentUserEmail = user.email.toLowerCase().trim();
         loadPage();
         loadStats();
         loadAreaFilter();
         buildSubTabs();
+        // Pre-load dashboard data in background
+        loadDashboard();
       } else {
         document.getElementById("auth-screen").classList.remove("hidden");
         document.getElementById("app-screen").classList.add("hidden");
@@ -205,12 +208,30 @@
       document.getElementById("area-filter").value  = "";
       const sentFilter = document.getElementById("sent-filter");
       if (sentFilter) sentFilter.value = "";
-      // Update main tab UI
+
+      // Update tab UI
       document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
       const el = document.getElementById("tab-" + tab);
       if (el) el.classList.add("active");
-      // Show/hide subtab bar
-      document.getElementById("subtab-bar").style.display = tab === "unsent" ? "flex" : "none";
+
+      // Show/hide panels
+      const isDash = tab === "dashboard";
+      document.getElementById("dashboard-panel").classList.toggle("hidden", !isDash);
+      document.getElementById("subtab-bar").style.display  = tab === "unsent" ? "flex" : "none";
+
+      // Hide toolbar and table when on dashboard
+      const mainEl = document.querySelector(".toolbar");
+      const tableEl = document.querySelector(".table-wrap");
+      const pagEl   = document.querySelector(".pagination");
+      if (mainEl)  mainEl.style.display  = isDash ? "none" : "flex";
+      if (tableEl) tableEl.style.display = isDash ? "none" : "block";
+      if (pagEl)   pagEl.style.display   = isDash ? "none" : "flex";
+
+      if (isDash) {
+        loadDashboard();
+        return;
+      }
+
       allDocIds = []; currentPage = 1;
       loadPage();
     };
@@ -496,6 +517,190 @@
       return parts.some(p => stringSimilarity(p, newName) > 0.6);
     }
 
+
+
+    // ================================================================
+    // DASHBOARD
+    // ================================================================
+    let currentUserEmail = "";  // set on login
+    let dashPeriod   = 7;      // days; 0 = all time
+    let dashChart    = null;   // Chart.js instance
+    let dashAllData  = [];     // cached full dataset
+
+    window.setDashPeriod = (days) => {
+      dashPeriod = days;
+      document.querySelectorAll("[id^='dp-']").forEach(b => b.classList.remove("active"));
+      const btn = document.getElementById("dp-" + days);
+      if (btn) btn.classList.add("active");
+      renderDashboard(dashAllData);
+    };
+
+    async function loadDashboard() {
+      const snap   = await getDocs(collection(db, "customers"));
+      dashAllData  = snap.docs.map(d => d.data());
+      renderDashboard(dashAllData);
+    }
+
+    function parseDate(s) {
+      // Parse DD/MM/YYYY -> Date object
+      if (!s || s === "No") return null;
+      // Handle prefixed values like "Auto-reply 12/06/2024", "Read 12/06/2024"
+      const m = s.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+      if (m) return new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]));
+      return null;
+    }
+
+    function renderDashboard(all) {
+      const now    = new Date();
+      now.setHours(23, 59, 59, 999);
+      const cutoff = dashPeriod > 0
+        ? new Date(now.getTime() - (dashPeriod - 1) * 86400000)
+        : null;
+      if (cutoff) cutoff.setHours(0, 0, 0, 0);
+
+      // Filter to period
+      const inPeriod = all.filter(c => {
+        if (!c.sent || c.sent === "No") return false;
+        const d = parseDate(c.sent);
+        if (!d) return false;
+        // Filter by logged-in user if sentBy is recorded
+        if (c.sentBy && currentUserEmail && c.sentBy.toLowerCase() !== currentUserEmail) return false;
+        return cutoff ? d >= cutoff : true;
+      });
+
+      const withReply = inPeriod.filter(c => {
+        const r = (c.reply || "").trim();
+        return r && r !== "No" && r !== "";
+      });
+
+      // Note under stats if filtering by user
+      const filterNote = currentUserEmail
+        ? `Showing activity for ${currentUserEmail}`
+        : "Showing all activity";
+      document.getElementById("dash-period-label").textContent = filterNote;
+
+      // Breakdown of reply types
+      const breakdown = { Real: 0, "Auto-reply": 0, "Read receipt": 0, Bounced: 0 };
+      all.forEach(c => {
+        const r = (c.reply || "").trim();
+        if (!r || r === "No") return;
+        if (r === "Bounced")           breakdown.Bounced++;
+        else if (r.startsWith("Auto")) breakdown["Auto-reply"]++;
+        else if (r.startsWith("Read")) breakdown["Read receipt"]++;
+        else                           breakdown.Real++;
+      });
+
+      // Stats
+      const sentCount   = inPeriod.length;
+      const replyCount  = withReply.length;
+      const replyRate   = sentCount > 0 ? ((replyCount / sentCount) * 100).toFixed(1) : "0.0";
+      const days        = dashPeriod > 0 ? dashPeriod : (() => {
+        const dates = all.map(c => parseDate(c.sent)).filter(Boolean);
+        if (!dates.length) return 1;
+        const oldest = Math.min(...dates.map(d => d.getTime()));
+        return Math.max(1, Math.ceil((now - oldest) / 86400000));
+      })();
+      const avgPerDay   = (sentCount / days).toFixed(1);
+
+      document.getElementById("dash-sent").textContent    = sentCount;
+      document.getElementById("dash-replies").textContent = replyCount;
+      document.getElementById("dash-rate").textContent    = replyRate + "%";
+      document.getElementById("dash-avg").textContent     = avgPerDay;
+
+      const label = dashPeriod === 0 ? "All time" : `Last ${dashPeriod} days`;
+      document.getElementById("dash-period-label").textContent = label;
+
+      // Build per-day sent counts
+      const dayMap = {};
+      const numDays = dashPeriod > 0 ? dashPeriod : Math.min(days, 90);
+      for (let i = numDays - 1; i >= 0; i--) {
+        const d   = new Date(now);
+        d.setDate(d.getDate() - i);
+        const key = d.toLocaleDateString("en-GB");
+        dayMap[key] = 0;
+      }
+
+      (dashPeriod > 0 ? inPeriod : all).forEach(c => {
+        const d = parseDate(c.sent);
+        if (!d) return;
+        const key = d.toLocaleDateString("en-GB");
+        if (key in dayMap) dayMap[key]++;
+        else if (dashPeriod === 0) dayMap[key] = (dayMap[key] || 0) + 1;
+      });
+
+      const labels = Object.keys(dayMap);
+      const values = Object.values(dayMap);
+      const hasData = values.some(v => v > 0);
+
+      document.getElementById("chart-empty").style.display = hasData ? "none" : "block";
+      document.getElementById("sent-chart").style.display  = hasData ? "block" : "none";
+
+      if (hasData) {
+        if (dashChart) dashChart.destroy();
+        const ctx = document.getElementById("sent-chart").getContext("2d");
+        dashChart = new Chart(ctx, {
+          type: "bar",
+          data: {
+            labels,
+            datasets: [{
+              label: "Emails Sent",
+              data: values,
+              backgroundColor: "rgba(30,122,255,0.7)",
+              borderColor:     "rgba(30,122,255,1)",
+              borderWidth: 1,
+              borderRadius: 4,
+            }]
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  title: ctx => ctx[0].label,
+                  label: ctx => ` ${ctx.raw} email${ctx.raw !== 1 ? "s" : ""} sent`
+                }
+              }
+            },
+            scales: {
+              x: {
+                ticks: {
+                  color: "#7d8590",
+                  font: { family: "DM Mono, monospace", size: 10 },
+                  maxRotation: 45,
+                  autoSkip: true,
+                  maxTicksLimit: dashPeriod === 0 ? 20 : dashPeriod
+                },
+                grid: { color: "#21282f" }
+              },
+              y: {
+                beginAtZero: true,
+                ticks: {
+                  color: "#7d8590",
+                  font: { family: "DM Mono, monospace", size: 10 },
+                  stepSize: 1
+                },
+                grid: { color: "#21282f" }
+              }
+            }
+          }
+        });
+      }
+
+      // Reply breakdown cards
+      const colours = {
+        Real:           "var(--accent2)",
+        "Auto-reply":   "var(--muted)",
+        "Read receipt": "var(--warn)",
+        Bounced:        "var(--danger)"
+      };
+      document.getElementById("reply-breakdown").innerHTML = Object.entries(breakdown).map(([k, v]) =>
+        `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em">${k}</div>
+          <div style="font-family:Syne,sans-serif;font-size:26px;font-weight:700;color:${colours[k]}">${v}</div>
+        </div>`
+      ).join("");
+    }
 
     // ================================================================
     // EML PROCESSING -- ported from eml_to_spreadsheet.py
@@ -792,7 +997,8 @@
             log.push({ file: file.name, status: "reply", practice: record.practiceName, value: cur.reply });
           } else {
             // Outbound sent
-            cur.sent = earliest(cur.sent, eml.date) || "Yes";
+            cur.sent   = earliest(cur.sent, eml.date) || "Yes";
+            cur.sentBy = eml.fromEmails.find(e => GEORGE_ADDRS.has(e)) || currentUserEmail;
             log.push({ file: file.name, status: "sent", practice: record.practiceName, value: cur.sent });
           }
         }
@@ -972,6 +1178,8 @@
           if (norm.reply && norm.reply !== "No" && (!norm.sent || norm.sent === "No" || norm.sent.trim() === "")) {
             norm.sent = norm.reply;
           }
+          // Tag with the logged-in user who imported this
+          if (norm.sent) norm.sentBy = currentUserEmail;
           if (norm.dateOfSigning) norm.dateOfSigning = excelDateToString(norm.dateOfSigning);
           norm.sourceFormat = format;
           norm.importedAt   = new Date().toISOString();
@@ -1053,6 +1261,8 @@
         loadStats();
         loadAreaFilter();
         buildSubTabs();
+        // Pre-load dashboard data in background
+        loadDashboard();
         buildSubTabs();
       } catch (err) {
         statusEl.textContent = "Import failed: " + err.message;
@@ -1307,6 +1517,7 @@
   </script>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
@@ -1487,6 +1698,7 @@
 
     <!-- Main tabs -->
     <div class="tab-bar">
+      <button class="tab-btn" id="tab-dashboard" onclick="switchTab('dashboard')">Dashboard</button>
       <button class="tab-btn active" id="tab-all"    onclick="switchTab('all')">All Practices</button>
       <button class="tab-btn"        id="tab-sent"   onclick="switchTab('sent')">✉ Sent</button>
       <button class="tab-btn"        id="tab-unsent" onclick="switchTab('unsent')">✗ Unsent</button>
@@ -1497,6 +1709,52 @@
     <!-- Unsent subtabs (shown only when Unsent tab active) -->
     <div class="subtab-bar" id="subtab-bar" style="display:none">
       <button class="subtab-btn active" id="subtab-" onclick="switchSubTab('')">All Unsent</button>
+    </div>
+
+    <!-- Dashboard Panel -->
+    <div id="dashboard-panel" class="hidden">
+
+      <!-- Time period selector -->
+      <div style="display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;align-items:center">
+        <button class="subtab-btn active" id="dp-7"  onclick="setDashPeriod(7)">Last 7 days</button>
+        <button class="subtab-btn"        id="dp-30" onclick="setDashPeriod(30)">Last 30 days</button>
+        <button class="subtab-btn"        id="dp-0"  onclick="setDashPeriod(0)">All time</button>
+        <span id="dash-period-label" style="color:var(--muted);font-size:11px;margin-left:8px"></span>
+      </div>
+
+      <!-- Stat cards -->
+      <div class="stats" style="margin-bottom:20px">
+        <div class="stat-card">
+          <div class="stat-label">Emails Sent</div>
+          <div class="stat-value blue"  id="dash-sent">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Replies Received</div>
+          <div class="stat-value green" id="dash-replies">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Reply Rate</div>
+          <div class="stat-value warn"  id="dash-rate">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Avg Sent / Day</div>
+          <div class="stat-value muted" id="dash-avg">--</div>
+        </div>
+      </div>
+
+      <!-- Chart -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:14px;font-weight:600;letter-spacing:.08em;text-transform:uppercase">Emails Sent Per Day</div>
+        <canvas id="sent-chart" height="80"></canvas>
+        <div id="chart-empty" style="display:none;text-align:center;color:var(--muted);padding:40px;font-size:12px">No sent data in this period</div>
+      </div>
+
+      <!-- Reply breakdown -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:14px;font-weight:600;letter-spacing:.08em;text-transform:uppercase">Reply Breakdown</div>
+        <div id="reply-breakdown" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px"></div>
+      </div>
+
     </div>
 
     <div class="toolbar">
