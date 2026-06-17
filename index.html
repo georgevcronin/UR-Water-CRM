@@ -577,9 +577,10 @@
       });
 
       // User-filtered sent records for productivity metrics
+      // Only include records explicitly attributed to the logged-in user
       const sent = sentAll.filter(c => {
-        if (!currentUserEmail || !c.sentBy) return true;
-        return c.sentBy.toLowerCase() === currentUserEmail;
+        if (!currentUserEmail) return true;
+        return (c.sentBy || "").toLowerCase() === currentUserEmail;
       });
 
       // Productivity metrics
@@ -680,7 +681,7 @@
       if (cutoff) cutoff.setHours(0, 0, 0, 0);
       const inPeriod = sentAll.filter(c => {
         const d = parseDate(c.sent); if (!d) return false;
-        if (c.sentBy && currentUserEmail && c.sentBy.toLowerCase() !== currentUserEmail) return false;
+        if (currentUserEmail && (c.sentBy || "").toLowerCase() !== currentUserEmail) return false;
         return cutoff ? d >= cutoff : true;
       });
       const numDays = dashPeriod > 0 ? dashPeriod : (() => {
