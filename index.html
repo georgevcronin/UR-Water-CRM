@@ -47,12 +47,10 @@
         document.getElementById("app-screen").classList.remove("hidden");
         document.getElementById("user-email").textContent = user.email;
         currentUserEmail = user.email.toLowerCase().trim();
-        loadPage();
         loadStats();
         loadAreaFilter();
         buildSubTabs();
-        // Pre-load dashboard data in background
-        loadDashboard();
+        switchTab('dashboard');
       } else {
         document.getElementById("auth-screen").classList.remove("hidden");
         document.getElementById("app-screen").classList.add("hidden");
@@ -525,6 +523,7 @@
     let currentUserEmail = "";  // set on login
     let dashPeriod   = 7;      // days; 0 = all time
     let dashChart    = null;   // Chart.js instance
+    let weeklyChart  = null;   // weekly comparison chart
     let dashAllData  = [];     // cached full dataset
 
     window.setDashPeriod = (days) => {
@@ -534,6 +533,19 @@
       if (btn) btn.classList.add("active");
       renderDashboard(dashAllData);
     };
+
+    function getWeekBounds(weekOffset) {
+      const now = new Date();
+      const day = now.getDay();
+      const mondayOffset = day === 0 ? -6 : 1 - day;
+      const monday = new Date(now);
+      monday.setDate(now.getDate() + mondayOffset + (weekOffset || 0) * 7);
+      monday.setHours(0, 0, 0, 0);
+      const sunday = new Date(monday);
+      sunday.setDate(monday.getDate() + 6);
+      sunday.setHours(23, 59, 59, 999);
+      return { monday, sunday };
+    }
 
     async function loadDashboard() {
       const snap   = await getDocs(collection(db, "customers"));
@@ -551,149 +563,177 @@
     }
 
     function renderDashboard(all) {
-      const now    = new Date();
+      const now      = new Date();
       now.setHours(23, 59, 59, 999);
-      const cutoff = dashPeriod > 0
-        ? new Date(now.getTime() - (dashPeriod - 1) * 86400000)
-        : null;
-      if (cutoff) cutoff.setHours(0, 0, 0, 0);
+      const today    = new Date(); today.setHours(0, 0, 0, 0);
+      const thisWeek = getWeekBounds(0);
+      const lastWeek = getWeekBounds(-1);
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-      // Filter to period
-      const inPeriod = all.filter(c => {
+      // All records with a valid sent date
+      const sentAll = all.filter(c => {
         if (!c.sent || c.sent === "No") return false;
-        const d = parseDate(c.sent);
-        if (!d) return false;
-        // Filter by logged-in user if sentBy is recorded
-        if (c.sentBy && currentUserEmail && c.sentBy.toLowerCase() !== currentUserEmail) return false;
-        return cutoff ? d >= cutoff : true;
+        return !!parseDate(c.sent);
       });
 
-      const withReply = inPeriod.filter(c => {
-        const r = (c.reply || "").trim();
-        return r && r !== "No" && r !== "";
+      // User-filtered sent records for productivity metrics
+      const sent = sentAll.filter(c => {
+        if (!currentUserEmail || !c.sentBy) return true;
+        return c.sentBy.toLowerCase() === currentUserEmail;
       });
 
-      // Note under stats if filtering by user
-      const filterNote = currentUserEmail
-        ? `Showing activity for ${currentUserEmail}`
-        : "Showing all activity";
-      document.getElementById("dash-period-label").textContent = filterNote;
+      // Productivity metrics
+      const todayCount    = sent.filter(c => { const d = parseDate(c.sent); return d && d >= today; }).length;
+      const thisWeekCount = sent.filter(c => { const d = parseDate(c.sent); return d && d >= thisWeek.monday && d <= thisWeek.sunday; }).length;
+      const lastWeekCount = sent.filter(c => { const d = parseDate(c.sent); return d && d >= lastWeek.monday && d <= lastWeek.sunday; }).length;
+      const monthCount    = sent.filter(c => { const d = parseDate(c.sent); return d && d >= monthStart; }).length;
 
-      // Breakdown of reply types
-      const breakdown = { Real: 0, "Auto-reply": 0, "Read receipt": 0, Bounced: 0 };
-      all.forEach(c => {
-        const r = (c.reply || "").trim();
-        if (!r || r === "No") return;
-        if (r === "Bounced")           breakdown.Bounced++;
-        else if (r.startsWith("Auto")) breakdown["Auto-reply"]++;
-        else if (r.startsWith("Read")) breakdown["Read receipt"]++;
-        else                           breakdown.Real++;
-      });
+      const daysElapsed = Math.max(1, Math.min(7, Math.ceil((Date.now() - thisWeek.monday.getTime()) / 86400000)));
+      const avgWeek     = (thisWeekCount / daysElapsed).toFixed(1);
 
-      // Stats
-      const sentCount   = inPeriod.length;
-      const replyCount  = withReply.length;
-      const replyRate   = sentCount > 0 ? ((replyCount / sentCount) * 100).toFixed(1) : "0.0";
-      const days        = dashPeriod > 0 ? dashPeriod : (() => {
-        const dates = all.map(c => parseDate(c.sent)).filter(Boolean);
-        if (!dates.length) return 1;
-        const oldest = Math.min(...dates.map(d => d.getTime()));
-        return Math.max(1, Math.ceil((now - oldest) / 86400000));
-      })();
-      const avgPerDay   = (sentCount / days).toFixed(1);
-
-      document.getElementById("dash-sent").textContent    = sentCount;
-      document.getElementById("dash-replies").textContent = replyCount;
-      document.getElementById("dash-rate").textContent    = replyRate + "%";
-      document.getElementById("dash-avg").textContent     = avgPerDay;
-
-      const label = dashPeriod === 0 ? "All time" : `Last ${dashPeriod} days`;
-      document.getElementById("dash-period-label").textContent = label;
-
-      // Build per-day sent counts
-      const dayMap = {};
-      const numDays = dashPeriod > 0 ? dashPeriod : Math.min(days, 90);
-      for (let i = numDays - 1; i >= 0; i--) {
-        const d   = new Date(now);
-        d.setDate(d.getDate() - i);
-        const key = d.toLocaleDateString("en-GB");
-        dayMap[key] = 0;
+      // Week-over-week change
+      let weekChangeText = "--", weekChangeColor = "var(--muted)";
+      if (lastWeekCount > 0) {
+        const pct = Math.round(((thisWeekCount - lastWeekCount) / lastWeekCount) * 100);
+        weekChangeText  = (pct >= 0 ? "+" : "") + pct + "%";
+        weekChangeColor = pct > 0 ? "var(--accent2)" : pct < 0 ? "var(--danger)" : "var(--muted)";
+      } else if (thisWeekCount > 0) {
+        weekChangeText = "New"; weekChangeColor = "var(--accent2)";
       }
 
-      (dashPeriod > 0 ? inPeriod : all).forEach(c => {
-        const d = parseDate(c.sent);
-        if (!d) return;
-        const key = d.toLocaleDateString("en-GB");
-        if (key in dayMap) dayMap[key]++;
-        else if (dashPeriod === 0) dayMap[key] = (dayMap[key] || 0) + 1;
+      // Per-day breakdown Mon-Sun for this and last week
+      const dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+      const thisDays = Array(7).fill(0);
+      const lastDays = Array(7).fill(0);
+      sent.forEach(c => {
+        const d = parseDate(c.sent); if (!d) return;
+        if (d >= thisWeek.monday && d <= thisWeek.sunday) {
+          const idx = Math.round((d - thisWeek.monday) / 86400000);
+          if (idx >= 0 && idx < 7) thisDays[idx]++;
+        }
+        if (d >= lastWeek.monday && d <= lastWeek.sunday) {
+          const idx = Math.round((d - lastWeek.monday) / 86400000);
+          if (idx >= 0 && idx < 7) lastDays[idx]++;
+        }
       });
 
-      const labels = Object.keys(dayMap);
-      const values = Object.values(dayMap);
-      const hasData = values.some(v => v > 0);
+      const bestDayVal = Math.max(...thisDays);
+      const bestDayIdx = thisDays.indexOf(bestDayVal);
+      const bestDayStr = bestDayVal > 0 ? `${dayNames[bestDayIdx]} (${bestDayVal})` : "--";
 
-      document.getElementById("chart-empty").style.display = hasData ? "none" : "block";
-      document.getElementById("sent-chart").style.display  = hasData ? "block" : "none";
+      // Reply metrics (all time)
+      const withReply = all.filter(c => { const r = (c.reply || "").trim(); return r && r !== "No"; });
+      const replyRate = sentAll.length > 0
+        ? ((withReply.length / sentAll.length) * 100).toFixed(1) + "%"
+        : "0.0%";
 
-      if (hasData) {
-        if (dashChart) dashChart.destroy();
-        const ctx = document.getElementById("sent-chart").getContext("2d");
-        dashChart = new Chart(ctx, {
+      // Update DOM
+      document.getElementById("dash-today").textContent    = todayCount;
+      document.getElementById("dash-thisweek").textContent = thisWeekCount;
+      document.getElementById("dash-lastweek").textContent = lastWeekCount;
+      document.getElementById("dash-month").textContent    = monthCount;
+      document.getElementById("dash-bestday").textContent  = bestDayStr;
+      document.getElementById("dash-avgweek").textContent  = avgWeek;
+      document.getElementById("dash-replies").textContent  = withReply.length;
+      document.getElementById("dash-rate").textContent     = replyRate;
+
+      const wcEl = document.getElementById("dash-weekchange");
+      if (wcEl) { wcEl.textContent = weekChangeText; wcEl.style.color = weekChangeColor; }
+
+      const dlEl = document.getElementById("dash-date-label");
+      if (dlEl) dlEl.textContent =
+        `Week of ${thisWeek.monday.toLocaleDateString("en-GB")} – ${thisWeek.sunday.toLocaleDateString("en-GB")}`;
+
+      // Weekly comparison chart (Mon–Sun, this week vs last week)
+      const hasWeeklyData = thisDays.some(v => v > 0) || lastDays.some(v => v > 0);
+      const wChartEl = document.getElementById("weekly-chart");
+      const wEmptyEl = document.getElementById("weekly-chart-empty");
+      if (wEmptyEl) wEmptyEl.style.display = hasWeeklyData ? "none" : "block";
+      if (wChartEl) wChartEl.style.display  = hasWeeklyData ? "block" : "none";
+      if (hasWeeklyData && wChartEl) {
+        if (weeklyChart) weeklyChart.destroy();
+        weeklyChart = new Chart(wChartEl.getContext("2d"), {
           type: "bar",
           data: {
-            labels,
-            datasets: [{
-              label: "Emails Sent",
-              data: values,
-              backgroundColor: "rgba(30,122,255,0.7)",
-              borderColor:     "rgba(30,122,255,1)",
-              borderWidth: 1,
-              borderRadius: 4,
-            }]
+            labels: dayNames,
+            datasets: [
+              { label: "This Week", data: thisDays, backgroundColor: "rgba(30,122,255,0.7)",    borderColor: "rgba(30,122,255,1)",    borderWidth: 1, borderRadius: 4 },
+              { label: "Last Week", data: lastDays, backgroundColor: "rgba(125,133,144,0.35)", borderColor: "rgba(125,133,144,0.6)", borderWidth: 1, borderRadius: 4 }
+            ]
           },
           options: {
             responsive: true,
             plugins: {
               legend: { display: false },
-              tooltip: {
-                callbacks: {
-                  title: ctx => ctx[0].label,
-                  label: ctx => ` ${ctx.raw} email${ctx.raw !== 1 ? "s" : ""} sent`
-                }
-              }
+              tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.raw} email${ctx.raw !== 1 ? "s" : ""}` } }
             },
             scales: {
-              x: {
-                ticks: {
-                  color: "#7d8590",
-                  font: { family: "DM Mono, monospace", size: 10 },
-                  maxRotation: 45,
-                  autoSkip: true,
-                  maxTicksLimit: dashPeriod === 0 ? 20 : dashPeriod
-                },
-                grid: { color: "#21282f" }
-              },
-              y: {
-                beginAtZero: true,
-                ticks: {
-                  color: "#7d8590",
-                  font: { family: "DM Mono, monospace", size: 10 },
-                  stepSize: 1
-                },
-                grid: { color: "#21282f" }
-              }
+              x: { ticks: { color: "#7d8590", font: { family: "DM Mono, monospace", size: 11 } }, grid: { color: "#21282f" } },
+              y: { beginAtZero: true, ticks: { color: "#7d8590", font: { family: "DM Mono, monospace", size: 11 }, stepSize: 1 }, grid: { color: "#21282f" } }
+            }
+          }
+        });
+      }
+
+      // Extended period chart
+      const cutoff = dashPeriod > 0 ? new Date(now.getTime() - (dashPeriod - 1) * 86400000) : null;
+      if (cutoff) cutoff.setHours(0, 0, 0, 0);
+      const inPeriod = sentAll.filter(c => {
+        const d = parseDate(c.sent); if (!d) return false;
+        if (c.sentBy && currentUserEmail && c.sentBy.toLowerCase() !== currentUserEmail) return false;
+        return cutoff ? d >= cutoff : true;
+      });
+      const numDays = dashPeriod > 0 ? dashPeriod : (() => {
+        const dates = sentAll.map(c => parseDate(c.sent)).filter(Boolean);
+        if (!dates.length) return 1;
+        return Math.max(1, Math.ceil((Date.now() - Math.min(...dates.map(d => d.getTime()))) / 86400000));
+      })();
+      const extDayMap = {};
+      for (let i = Math.min(numDays, 90) - 1; i >= 0; i--) {
+        const d = new Date(now); d.setDate(d.getDate() - i);
+        extDayMap[d.toLocaleDateString("en-GB")] = 0;
+      }
+      (dashPeriod > 0 ? inPeriod : sentAll).forEach(c => {
+        const d = parseDate(c.sent); if (!d) return;
+        const key = d.toLocaleDateString("en-GB");
+        if (key in extDayMap) extDayMap[key]++;
+        else if (dashPeriod === 0) extDayMap[key] = (extDayMap[key] || 0) + 1;
+      });
+      const extLabels = Object.keys(extDayMap);
+      const extValues = Object.values(extDayMap);
+      const hasExtData = extValues.some(v => v > 0);
+      document.getElementById("chart-empty").style.display = hasExtData ? "none" : "block";
+      document.getElementById("sent-chart").style.display  = hasExtData ? "block" : "none";
+      if (hasExtData) {
+        if (dashChart) dashChart.destroy();
+        const ctx = document.getElementById("sent-chart").getContext("2d");
+        dashChart = new Chart(ctx, {
+          type: "bar",
+          data: { labels: extLabels, datasets: [{ label: "Emails Sent", data: extValues, backgroundColor: "rgba(30,122,255,0.7)", borderColor: "rgba(30,122,255,1)", borderWidth: 1, borderRadius: 4 }] },
+          options: {
+            responsive: true,
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: { title: ctx => ctx[0].label, label: ctx => ` ${ctx.raw} email${ctx.raw !== 1 ? "s" : ""} sent` } }
+            },
+            scales: {
+              x: { ticks: { color: "#7d8590", font: { family: "DM Mono, monospace", size: 10 }, maxRotation: 45, autoSkip: true, maxTicksLimit: dashPeriod === 0 ? 20 : dashPeriod }, grid: { color: "#21282f" } },
+              y: { beginAtZero: true, ticks: { color: "#7d8590", font: { family: "DM Mono, monospace", size: 10 }, stepSize: 1 }, grid: { color: "#21282f" } }
             }
           }
         });
       }
 
       // Reply breakdown cards
-      const colours = {
-        Real:           "var(--accent2)",
-        "Auto-reply":   "var(--muted)",
-        "Read receipt": "var(--warn)",
-        Bounced:        "var(--danger)"
-      };
+      const breakdown = { Real: 0, "Auto-reply": 0, "Read receipt": 0, Bounced: 0 };
+      all.forEach(c => {
+        const r = (c.reply || "").trim(); if (!r || r === "No") return;
+        if (r === "Bounced")           breakdown.Bounced++;
+        else if (r.startsWith("Auto")) breakdown["Auto-reply"]++;
+        else if (r.startsWith("Read")) breakdown["Read receipt"]++;
+        else                           breakdown.Real++;
+      });
+      const colours = { Real: "var(--accent2)", "Auto-reply": "var(--muted)", "Read receipt": "var(--warn)", Bounced: "var(--danger)" };
       document.getElementById("reply-breakdown").innerHTML = Object.entries(breakdown).map(([k, v]) =>
         `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px">
           <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em">${k}</div>
@@ -1698,8 +1738,8 @@
 
     <!-- Main tabs -->
     <div class="tab-bar">
-      <button class="tab-btn" id="tab-dashboard" onclick="switchTab('dashboard')">Dashboard</button>
-      <button class="tab-btn active" id="tab-all"    onclick="switchTab('all')">All Practices</button>
+      <button class="tab-btn active" id="tab-dashboard" onclick="switchTab('dashboard')">Dashboard</button>
+      <button class="tab-btn" id="tab-all"    onclick="switchTab('all')">All Practices</button>
       <button class="tab-btn"        id="tab-sent"   onclick="switchTab('sent')">✉ Sent</button>
       <button class="tab-btn"        id="tab-unsent" onclick="switchTab('unsent')">✗ Unsent</button>
       <div style="flex:1"></div>
@@ -1714,35 +1754,76 @@
     <!-- Dashboard Panel -->
     <div id="dashboard-panel" class="hidden">
 
-      <!-- Time period selector -->
-      <div style="display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;align-items:center">
-        <button class="subtab-btn active" id="dp-7"  onclick="setDashPeriod(7)">Last 7 days</button>
-        <button class="subtab-btn"        id="dp-30" onclick="setDashPeriod(30)">Last 30 days</button>
-        <button class="subtab-btn"        id="dp-0"  onclick="setDashPeriod(0)">All time</button>
-        <span id="dash-period-label" style="color:var(--muted);font-size:11px;margin-left:8px"></span>
+      <!-- Dashboard header -->
+      <div style="margin-bottom:24px">
+        <div style="font-family:'Syne',sans-serif;font-size:22px;font-weight:800;margin-bottom:4px">Productivity Dashboard</div>
+        <div style="color:var(--muted);font-size:12px" id="dash-date-label"></div>
       </div>
 
-      <!-- Stat cards -->
-      <div class="stats" style="margin-bottom:20px">
+      <!-- Primary productivity metrics -->
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px">
+        <div class="stat-card" style="border-left:3px solid var(--accent)">
+          <div class="stat-label">Sent Today</div>
+          <div class="stat-value blue" id="dash-today">--</div>
+        </div>
+        <div class="stat-card" style="border-left:3px solid var(--accent2)">
+          <div class="stat-label">This Week</div>
+          <div class="stat-value green" id="dash-thisweek">--</div>
+        </div>
         <div class="stat-card">
-          <div class="stat-label">Emails Sent</div>
-          <div class="stat-value blue"  id="dash-sent">--</div>
+          <div class="stat-label">Last Week</div>
+          <div class="stat-value muted" id="dash-lastweek">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">vs Last Week</div>
+          <div class="stat-value" id="dash-weekchange" style="font-family:'Syne',sans-serif;font-size:28px;font-weight:700">--</div>
+        </div>
+        <div class="stat-card" style="border-left:3px solid var(--warn)">
+          <div class="stat-label">This Month</div>
+          <div class="stat-value warn" id="dash-month">--</div>
+        </div>
+      </div>
+
+      <!-- Secondary metrics -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+        <div class="stat-card">
+          <div class="stat-label">Best Day This Week</div>
+          <div class="stat-value blue" id="dash-bestday" style="font-size:16px;font-family:'DM Mono',monospace;padding-top:4px">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Avg / Day (This Week)</div>
+          <div class="stat-value green" id="dash-avgweek">--</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Replies Received</div>
-          <div class="stat-value green" id="dash-replies">--</div>
+          <div class="stat-value warn" id="dash-replies">--</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Reply Rate</div>
-          <div class="stat-value warn"  id="dash-rate">--</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Avg Sent / Day</div>
-          <div class="stat-value muted" id="dash-avg">--</div>
+          <div class="stat-value muted" id="dash-rate">--</div>
         </div>
       </div>
 
-      <!-- Chart -->
+      <!-- Weekly comparison chart -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+          <div style="font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.08em;text-transform:uppercase">This Week vs Last Week</div>
+          <div style="display:flex;gap:14px;font-size:11px;color:var(--muted)">
+            <span><span style="display:inline-block;width:10px;height:10px;background:rgba(30,122,255,0.7);border-radius:2px;margin-right:5px;vertical-align:middle"></span>This week</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:rgba(125,133,144,0.4);border-radius:2px;margin-right:5px;vertical-align:middle"></span>Last week</span>
+          </div>
+        </div>
+        <canvas id="weekly-chart" height="80"></canvas>
+        <div id="weekly-chart-empty" style="display:none;text-align:center;color:var(--muted);padding:40px;font-size:12px">No sent data this week</div>
+      </div>
+
+      <!-- Extended period selector + chart -->
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+        <span style="font-size:10px;color:var(--muted);font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-right:4px">Extended view</span>
+        <button class="subtab-btn active" id="dp-7"  onclick="setDashPeriod(7)">Last 7 days</button>
+        <button class="subtab-btn"        id="dp-30" onclick="setDashPeriod(30)">Last 30 days</button>
+        <button class="subtab-btn"        id="dp-0"  onclick="setDashPeriod(0)">All time</button>
+      </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px">
         <div style="font-size:11px;color:var(--muted);margin-bottom:14px;font-weight:600;letter-spacing:.08em;text-transform:uppercase">Emails Sent Per Day</div>
         <canvas id="sent-chart" height="80"></canvas>
@@ -1751,7 +1832,7 @@
 
       <!-- Reply breakdown -->
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px">
-        <div style="font-size:11px;color:var(--muted);margin-bottom:14px;font-weight:600;letter-spacing:.08em;text-transform:uppercase">Reply Breakdown</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:14px;font-weight:600;letter-spacing:.08em;text-transform:uppercase">Reply Breakdown (All Time)</div>
         <div id="reply-breakdown" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px"></div>
       </div>
 
