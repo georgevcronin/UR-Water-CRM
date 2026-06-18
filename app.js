@@ -1241,55 +1241,90 @@ window.handleImport = async (e) => {
       validRecords.push(norm);
     }
 
-    // -- Merge by postcode -------------------------
-    // Build a map of postCode - record within the incoming batch first
-    // Then check Firestore for existing records with the same postcode
-    statusEl.textContent = "Checking for postcode matches-";
+    // -- Dedup & merge (org code → email → postcode) ------
+    statusEl.textContent = "Checking for duplicates...";
     const existingSnap = await getDocs(collection(db, "customers"));
-    const existingByPostcode = {};
+    const existingByOrg   = {};
+    const existingByEmail = {};
+    const existingByPC    = {};
     existingSnap.docs.forEach(d => {
-      const pc = (d.data().postCode || "").trim().toLowerCase();
-      if (pc) existingByPostcode[pc] = { id: d.id, ...d.data() };
+      const data = { id: d.id, ...d.data() };
+      const org   = (data.organisationCode || "").trim().toUpperCase();
+      const email = (data.emailCont || "").trim().toLowerCase();
+      const pc    = (data.postCode || "").trim().toLowerCase();
+      if (org)   existingByOrg[org]     = data;
+      if (email) existingByEmail[email] = data;
+      if (pc)    existingByPC[pc]       = data;
     });
 
-    // Also deduplicate within the incoming batch by postcode
-    const batchByPostcode = {};
-    const toWrite   = []; // new records
-    const toUpdate  = []; // existing records to merge into
+    // Fields filled in from incoming when existing record is blank
+    const FILL_FIELDS = ["area","doctorName","organisationCode","postCode",
+      "addressLine1","icb","phone","practiceManager","emailCont","spid","group"];
+
+    function findExisting(rec) {
+      const org   = (rec.organisationCode || "").trim().toUpperCase();
+      const email = (rec.emailCont || "").trim().toLowerCase();
+      const pc    = (rec.postCode || "").trim().toLowerCase();
+      return (org && existingByOrg[org]) || (email && existingByEmail[email]) || (pc && existingByPC[pc]) || null;
+    }
+
+    function buildMerge(existing, incoming) {
+      const updates = {};
+      // Append practice name if new
+      const names = (existing.practiceName || "").split(" / ").map(n => n.trim()).filter(Boolean);
+      const inName = (incoming.practiceName || "").trim();
+      if (inName && !names.some(n => n.toLowerCase() === inName.toLowerCase())) {
+        updates.practiceName = [...names, inName].join(" / ");
+      }
+      // Fill blank fields
+      for (const f of FILL_FIELDS) {
+        if (!(existing[f] || "").trim() && (incoming[f] || "").trim()) {
+          updates[f] = incoming[f];
+        }
+      }
+      return Object.keys(updates).length ? updates : null;
+    }
+
+    // Also track within-batch duplicates by the same three keys
+    const batchByOrg   = {};
+    const batchByEmail = {};
+    const batchByPC    = {};
+    const toWrite   = [];
+    const toUpdate  = [];
     let merged = 0;
 
     for (const record of validRecords) {
-      const pc = (record.postCode || "").trim().toLowerCase();
+      const org   = (record.organisationCode || "").trim().toUpperCase();
+      const email = (record.emailCont || "").trim().toLowerCase();
+      const pc    = (record.postCode || "").trim().toLowerCase();
 
-      // Check against existing Firestore records
-      if (pc && existingByPostcode[pc]) {
-        const existing = existingByPostcode[pc];
-        const existingNames = (existing.practiceName || "").split(" / ");
-        if (!existingNames.includes(record.practiceName)) {
-          existingNames.push(record.practiceName);
-          toUpdate.push({ id: existing.id, practiceName: existingNames.join(" / ") });
-          merged++;
-        }
-        // Skip writing as new record
+      // Match against existing Firestore records
+      const existing = findExisting(record);
+      if (existing) {
+        const updates = buildMerge(existing, record);
+        if (updates) { toUpdate.push({ id: existing.id, updates }); merged++; }
         continue;
       }
 
-      // Check within the incoming batch
-      if (pc && batchByPostcode[pc]) {
-        const existingNames = (batchByPostcode[pc].practiceName || "").split(" / ");
-        if (!existingNames.includes(record.practiceName)) {
-          existingNames.push(record.practiceName);
-          batchByPostcode[pc].practiceName = existingNames.join(" / ");
-          merged++;
-        }
+      // Match within incoming batch
+      const batchMatch =
+        (org   && batchByOrg[org])   ||
+        (email && batchByEmail[email]) ||
+        (pc    && batchByPC[pc]);
+      if (batchMatch) {
+        const updates = buildMerge(batchMatch, record);
+        if (updates) Object.assign(batchMatch, updates);
+        merged++;
         continue;
       }
 
-      if (pc) batchByPostcode[pc] = record;
+      if (org)   batchByOrg[org]     = record;
+      if (email) batchByEmail[email] = record;
+      if (pc)    batchByPC[pc]       = record;
       toWrite.push(record);
     }
 
-    statusEl.textContent = `Writing ${toWrite.length} records-`;
+    statusEl.textContent = `Writing ${toWrite.length} records...`;
     let imported = 0;
     const BATCH_SIZE = 499;
 
@@ -1301,15 +1336,15 @@ window.handleImport = async (e) => {
       });
       await batch.commit();
       imported += Math.min(BATCH_SIZE, toWrite.length - i);
-      statusEl.textContent = `Writing- ${imported} / ${toWrite.length}`;
+      statusEl.textContent = `Writing... ${imported} / ${toWrite.length}`;
     }
 
-    // Update merged records
-    for (const update of toUpdate) {
-      await updateDoc(doc(db, "customers", update.id), { practiceName: update.practiceName });
+    // Apply merges to existing records
+    for (const { id, updates } of toUpdate) {
+      await updateDoc(doc(db, "customers", id), updates);
     }
 
-    statusEl.textContent = `- Imported ${imported} record${imported !== 1 ? "s" : ""} from ${format} sheet${merged ? `, ${merged} merged by postcode` : ""}${skipped ? ` (${skipped} skipped)` : ""}.`;
+    statusEl.textContent = `Imported ${imported} record${imported !== 1 ? "s" : ""} from ${format} sheet${merged ? `, ${merged} merged` : ""}${skipped ? ` (${skipped} skipped)` : ""}.`;
     statusEl.className = "import-status success";
     allDocIds = []; currentPage = 1;
     loadPage();
