@@ -540,9 +540,13 @@ function getWeekBounds(weekOffset) {
 }
 
 async function loadDashboard() {
-  const snap   = await getDocs(collection(db, "customers"));
-  dashAllData  = snap.docs.map(d => d.data());
-  renderDashboard(dashAllData);
+  try {
+    const snap  = await getDocs(collection(db, "customers"));
+    dashAllData = snap.docs.map(d => d.data());
+    renderDashboard(dashAllData);
+  } catch (e) {
+    console.error("Dashboard error:", e);
+  }
 }
 
 function parseDate(s) {
@@ -569,11 +573,8 @@ function renderDashboard(all) {
   });
 
   // User-filtered sent records for productivity metrics
-  // Only include records explicitly attributed to the logged-in user
-  const sent = sentAll.filter(c => {
-    if (!currentUserEmail) return true;
-    return (c.sentBy || "").toLowerCase() === currentUserEmail;
-  });
+  // Use all sent records; sentBy attribution is informational only
+  const sent = sentAll;
 
   // Productivity metrics
   const todayCount    = sent.filter(c => { const d = parseDate(c.sent); return d && d >= today; }).length;
@@ -673,7 +674,6 @@ function renderDashboard(all) {
   if (cutoff) cutoff.setHours(0, 0, 0, 0);
   const inPeriod = sentAll.filter(c => {
     const d = parseDate(c.sent); if (!d) return false;
-    if (currentUserEmail && (c.sentBy || "").toLowerCase() !== currentUserEmail) return false;
     return cutoff ? d >= cutoff : true;
   });
   const numDays = dashPeriod > 0 ? dashPeriod : (() => {
