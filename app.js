@@ -958,7 +958,11 @@ function findMatches(eml, allRecords, strict) {
 window.triggerEmlUpload = () => document.getElementById("eml-file-input").click();
 
 window.handleEmlUpload = async (e) => {
-  const files = [...e.target.files];
+  await processEmlFiles([...e.target.files]);
+  e.target.value = "";
+};
+
+async function processEmlFiles(files) {
   if (!files.length) return;
 
   const statusEl = document.getElementById("eml-status");
@@ -1086,8 +1090,7 @@ window.handleEmlUpload = async (e) => {
   allDocIds = []; currentPage = 1;
   loadPage();
   loadStats();
-  e.target.value = "";
-};
+}
 
 window.triggerImport = () => document.getElementById("import-file").click();
 
@@ -1826,3 +1829,51 @@ window.exportSample = async () => {
     statusEl.textContent = "Export failed: " + err.message;
   }
 };
+
+// ── Drag-and-drop EML from Thunderbird ───────────────────────────────────────
+
+(function () {
+  const overlay = document.getElementById("eml-drop-overlay");
+  let dragDepth = 0;
+
+  function hasEmlFiles(dt) {
+    if (!dt) return false;
+    if ([...dt.types].includes("Files")) {
+      if (dt.items && dt.items.length) {
+        return [...dt.items].some(i => i.kind === "file" &&
+          (i.type === "message/rfc822" || (i.getAsFile() || {name:""}).name.endsWith(".eml")));
+      }
+      return true;
+    }
+    return false;
+  }
+
+  document.addEventListener("dragenter", e => {
+    if (!hasEmlFiles(e.dataTransfer)) return;
+    dragDepth++;
+    overlay.classList.add("active");
+    e.preventDefault();
+  });
+
+  document.addEventListener("dragleave", () => {
+    dragDepth--;
+    if (dragDepth <= 0) { dragDepth = 0; overlay.classList.remove("active"); }
+  });
+
+  document.addEventListener("dragover", e => {
+    if (!hasEmlFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  });
+
+  document.addEventListener("drop", async e => {
+    dragDepth = 0;
+    overlay.classList.remove("active");
+    const files = [...e.dataTransfer.files].filter(
+      f => f.name.endsWith(".eml") || f.type === "message/rfc822"
+    );
+    if (!files.length) return;
+    e.preventDefault();
+    await processEmlFiles(files);
+  });
+})();

@@ -171,6 +171,14 @@
     <input type="file" id="eml-file-input" accept=".eml" multiple class="hidden" onchange="handleEmlUpload(event)" />
     <div id="eml-status"></div>
 
+    <div id="eml-drop-overlay">
+      <div class="eml-drop-inner">
+        <div style="font-size:48px;margin-bottom:12px">✉</div>
+        <div style="font-size:20px;font-weight:700">Drop emails here</div>
+        <div style="font-size:13px;margin-top:6px;opacity:0.7">Drag .eml files from Thunderbird to update Sent / Reply</div>
+      </div>
+    </div>
+
     <div id="limit-warning" style="display:none;background:rgba(248,81,73,.1);color:#f85149;padding:10px 14px;border-radius:10px;font-size:12px;margin-bottom:10px;">
       ⚠ Over 1,000 records detected — only showing the first 1,000. Please delete duplicate records in Firebase Console.
     </div>

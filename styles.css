@@ -136,3 +136,28 @@ th.sortable:hover { color: var(--accent); }
 }
 
 .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+
+#eml-drop-overlay {
+  display: none;
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(10, 14, 26, 0.85);
+  backdrop-filter: blur(4px);
+  align-items: center; justify-content: center;
+  pointer-events: none;
+}
+#eml-drop-overlay.active {
+  display: flex;
+  pointer-events: all;
+}
+.eml-drop-inner {
+  border: 3px dashed var(--accent);
+  border-radius: 20px;
+  padding: 60px 80px;
+  text-align: center;
+  color: var(--text);
+  animation: pulse-border 1.2s ease-in-out infinite;
+}
+@keyframes pulse-border {
+  0%, 100% { border-color: var(--accent); }
+  50%       { border-color: var(--accent2); }
+}
