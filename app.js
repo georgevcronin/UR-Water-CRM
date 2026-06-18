@@ -979,7 +979,20 @@ function findMatches(eml, allRecords, strict) {
 }
 
 // -- Main EML upload handler --------------------------------------
-window.triggerEmlUpload = () => document.getElementById("eml-file-input").click();
+window.triggerEmlUpload = () => {
+  const input = document.createElement("input");
+  input.type     = "file";
+  input.multiple = true;
+  // Accept both extension and MIME type so all OS/browser combos show .eml files
+  input.accept   = ".eml,message/rfc822";
+  input.style.display = "none";
+  document.body.appendChild(input);
+  input.onchange = async (e) => {
+    await processEmlFiles([...e.target.files]);
+    document.body.removeChild(input);
+  };
+  input.click();
+};
 
 window.handleEmlUpload = async (e) => {
   await processEmlFiles([...e.target.files]);
