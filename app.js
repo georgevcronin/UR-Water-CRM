@@ -859,6 +859,7 @@ function parseEml(text) {
   const orgCode      = practiceM && practiceM[2] ? practiceM[2].trim() : "";
 
   return {
+    messageId: (headers["message-id"] || "").replace(/[<>\s]/g, ""),
     subject, toEmails: effectiveToEmails, fromEmails, date: sentDate,
     is_reply, is_auto_reply, is_read_receipt, is_bounce,
     spid, allSpids, phones, practiceName, orgCode,
@@ -884,6 +885,16 @@ function earliest(a, b) {
     return p.length === 3 ? parseInt(p[2]+p[1]+p[0]) : 0;
   };
   return toNum(a) <= toNum(b) ? a : b;
+}
+
+// Stable dedup key for an email — message-id preferred, fingerprint fallback
+function emailDocId(eml) {
+  if (eml.messageId) return eml.messageId.replace(/\//g, "_").slice(0, 500);
+  // djb2 fingerprint of date+from+subject
+  const raw = `${eml.date}|${eml.fromEmails.join(",")}|${eml.subject}`.toLowerCase();
+  let h = 5381;
+  for (let i = 0; i < raw.length; i++) h = ((h << 5) + h) ^ raw.charCodeAt(i);
+  return "fp_" + (h >>> 0).toString(16);
 }
 
 // -- Match one parsed EML against all Firestore records -----------
@@ -974,7 +985,8 @@ async function processEmlFiles(files) {
   const allRecords = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 
   let matched = 0, unmatched = 0, updated = 0;
-  const updateMap = {}; // id -> {sent, reply}
+  const updateMap     = {}; // id -> {sent, reply}
+  const unmatchedDocs = {}; // emailDocId -> unmatched email record
   const unmatchedFiles = [];
   const log = [];
 
@@ -1002,6 +1014,17 @@ async function processEmlFiles(files) {
       unmatched++;
       unmatchedFiles.push(file.name);
       log.push({ file: file.name, status: "unmatched", practice: "--", value: "--" });
+      const emailType = eml.is_bounce ? "bounce" : eml.is_read_receipt ? "read"
+        : eml.is_auto_reply ? "auto" : eml.is_reply ? "reply" : "sent";
+      unmatchedDocs[emailDocId(eml)] = {
+        date:        eml.date || "",
+        subject:     eml.subject || "",
+        from:        eml.fromEmails.join(", "),
+        to:          eml.toEmails.join(", "),
+        type:        emailType,
+        fileName:    file.name,
+        processedAt: new Date().toISOString(),
+      };
       continue;
     }
 
@@ -1054,7 +1077,7 @@ async function processEmlFiles(files) {
     }
   }
 
-  // Write updates to Firestore in batches of 499
+  // Write matched-record updates to Firestore in batches of 499
   const updateEntries = Object.entries(updateMap);
   statusEl.textContent = `Writing ${updateEntries.length} updates to Firestore...`;
   const BATCH_SIZE = 499;
@@ -1068,6 +1091,19 @@ async function processEmlFiles(files) {
     await batch.commit();
     updated += Math.min(BATCH_SIZE, updateEntries.length - i);
     statusEl.textContent = `Writing updates... ${updated} / ${updateEntries.length}`;
+  }
+
+  // Store unmatched emails for productivity tracking (deduped by message-id)
+  const unmatchedEntries = Object.entries(unmatchedDocs);
+  if (unmatchedEntries.length) {
+    statusEl.textContent = `Storing ${unmatchedEntries.length} unmatched emails...`;
+    for (let i = 0; i < unmatchedEntries.length; i += BATCH_SIZE) {
+      const batch = writeBatch(db);
+      unmatchedEntries.slice(i, i + BATCH_SIZE).forEach(([docId, data]) => {
+        batch.set(doc(db, "unmatched_emails", docId), data);
+      });
+      await batch.commit();
+    }
   }
 
   // Show results log
