@@ -467,7 +467,7 @@ const COLUMN_MAP = {
   phone:            ["phone","telephone","tel","contact number","phone number"],
   practiceManager:  ["practice manager","practicemanager","manager"],
   emailCont:        ["email cont.","email cont","email contact","email","e-mail","contact email"],
-  spid:             ["spid","supply point id","supply point","meter ref","mpan"],
+  spid:             ["spid","supply point id","supply point","spid details","meter ref","mpan"],
   group:            ["group"],
   sent:             ["sent"],
   reply:            ["reply","replied"],
@@ -1092,13 +1092,19 @@ window.handleEmlUpload = async (e) => {
 window.triggerImport = () => document.getElementById("import-file").click();
 
 // -- Format detection --
-function detectFormat(headers) {
+function detectFormat(headers, rows) {
   const h = headers.map(x => x.toLowerCase());
   const hasEverflow    = h.some(x => x.includes("everflow") || x.includes("commission") || x.includes("date of signing"));
   const hasGeorge      = h.some(x => x.includes("area") || x.includes("doctor") || x.includes("organisation code") || x.includes("icb"));
   const hasSourceSheet = h.some(x => x.includes("_source_sheet"));
+  // If any row comes from a MAIN SHEET or FRONTLOG sheet, treat as george (not eml_output)
+  const isGeorgeSheet  = rows && rows.some(r => {
+    const s = ((r._source_sheet || "") + "").trim().toUpperCase();
+    return s.startsWith("MAIN SHEET") || s.startsWith("FRONTLOG");
+  });
+  if (isGeorgeSheet)             return "george";
   const isEmlOutput    = hasSourceSheet || (hasGeorge && h.includes("sent") && h.includes("reply"));
-  if (isEmlOutput)              return "eml_output";
+  if (isEmlOutput)               return "eml_output";
   if (hasEverflow && !hasGeorge) return "everflow";
   if (hasGeorge && !hasEverflow) return "george";
   return "mixed";
@@ -1121,7 +1127,7 @@ window.handleImport = async (e) => {
 
     const rawHeaders = Object.keys(rows[0]);
     const headers    = rawHeaders.map(h => h.trim().toLowerCase());
-    const format     = detectFormat(headers);
+    const format     = detectFormat(headers, rows);
 
     // Build column index from COLUMN_MAP
     const colIdx = {};
@@ -1212,7 +1218,8 @@ window.handleImport = async (e) => {
         norm.doctorName  = norm.doctorName || "";
         // contractStatus already mapped from "Contract Status" column
       } else if (format === "george") {
-        // George records won't have everflow fields - leave blank
+        norm.sent            = "";
+        norm.reply           = "";
         norm.everflowReceipt = norm.everflowReceipt || "";
         norm.commission      = norm.commission || "";
         norm.dateOfSigning   = norm.dateOfSigning || "";
@@ -1397,9 +1404,10 @@ function parseXLSX(file) {
         // For George-format files: combine all sheets whose name starts with
         // "MAIN SHEET" (case-insensitive). Fall back to all sheets if none match,
         // or just the first sheet if it is a single-sheet file.
-        const mainSheets = wb.SheetNames.filter(n =>
-          n.trim().toUpperCase().startsWith("MAIN SHEET")
-        );
+        const mainSheets = wb.SheetNames.filter(n => {
+          const u = n.trim().toUpperCase();
+          return u.startsWith("MAIN SHEET") || u.startsWith("FRONTLOG");
+        });
         const sheetsToRead = mainSheets.length > 0 ? mainSheets : wb.SheetNames;
 
         const allRows = [];
