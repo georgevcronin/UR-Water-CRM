@@ -550,11 +550,13 @@ async function loadDashboard() {
 }
 
 function parseDate(s) {
-  // Parse DD/MM/YYYY -> Date object
-  if (!s || s === "No") return null;
-  // Handle prefixed values like "Auto-reply 12/06/2024", "Read 12/06/2024"
-  const m = s.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (!s || s === "No" || s === "Yes") return null;
+  // DD/MM/YYYY or D/M/YYYY (1- or 2-digit day/month)
+  const m = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
   if (m) return new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]));
+  // ISO YYYY-MM-DD
+  const iso = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
   return null;
 }
 
@@ -617,9 +619,16 @@ function renderDashboard(all) {
 
   // Reply metrics (all time)
   const withReply = all.filter(c => { const r = (c.reply || "").trim(); return r && r !== "No"; });
-  const replyRate = sentAll.length > 0
-    ? ((withReply.length / sentAll.length) * 100).toFixed(1) + "%"
+  // Total sent = any record with a non-empty sent value (includes "Yes")
+  const totalSent = all.filter(c => c.sent && c.sent !== "No" && c.sent.trim() !== "").length;
+  const replyRate = totalSent > 0
+    ? ((withReply.length / totalSent) * 100).toFixed(1) + "%"
     : "0.0%";
+
+  // Most recent sent date for "Last Active" indicator
+  const allDates  = sentAll.map(c => parseDate(c.sent)).filter(Boolean);
+  const lastDate  = allDates.length ? new Date(Math.max(...allDates.map(d => d.getTime()))) : null;
+  const lastActive = lastDate ? lastDate.toLocaleDateString("en-GB") : "—";
 
   // Update DOM
   document.getElementById("dash-today").textContent    = todayCount;
@@ -630,6 +639,10 @@ function renderDashboard(all) {
   document.getElementById("dash-avgweek").textContent  = avgWeek;
   document.getElementById("dash-replies").textContent  = withReply.length;
   document.getElementById("dash-rate").textContent     = replyRate;
+  const totalEl = document.getElementById("dash-total-sent");
+  if (totalEl) totalEl.textContent = totalSent;
+  const lastEl  = document.getElementById("dash-last-active");
+  if (lastEl)  lastEl.textContent  = lastActive;
 
   const wcEl = document.getElementById("dash-weekchange");
   if (wcEl) { wcEl.textContent = weekChangeText; wcEl.style.color = weekChangeColor; }

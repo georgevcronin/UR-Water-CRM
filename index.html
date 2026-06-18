@@ -95,7 +95,7 @@
       </div>
 
       <!-- Secondary metrics -->
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+      <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:20px">
         <div class="stat-card">
           <div class="stat-label">Best Day This Week</div>
           <div class="stat-value blue" id="dash-bestday" style="font-size:16px;font-family:'DM Mono',monospace;padding-top:4px">--</div>
@@ -111,6 +111,14 @@
         <div class="stat-card">
           <div class="stat-label">Reply Rate</div>
           <div class="stat-value muted" id="dash-rate">--</div>
+        </div>
+        <div class="stat-card" style="border-left:3px solid var(--accent)">
+          <div class="stat-label">Total Sent (All Time)</div>
+          <div class="stat-value blue" id="dash-total-sent">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Last Active</div>
+          <div class="stat-value muted" id="dash-last-active" style="font-size:15px;font-family:'DM Mono',monospace;padding-top:4px">--</div>
         </div>
       </div>
 
